@@ -7,9 +7,15 @@
 @property (nonatomic, readonly) int lastExitCode;
 /// 最近一次调用的 helper stdout + stderr，用于把失败原因带到界面/日志里。
 @property (nonatomic, copy, readonly) NSString *lastLog;
+/// 最近一次 RespringAndReport 成功杀掉的目标进程数；0 表示 kill 全部被拒（多半是权限不足）。
+@property (nonatomic, readonly) int lastKilledCount;
 
 - (BOOL) RebootDevice;
 - (BOOL) RebootUserspace;
 - (void) Respring;
+/// 与 Respring 相同，但会统计真正杀掉了几个 SpringBoard：一个都没杀掉时不 exit，
+/// 让上层能把「注销其实没成功」显示出来（旧实现无论 kill 成功与否都 exit(0)，
+/// 表现就是 App 一退出、用户看到“回到桌面”，误以为注销生效了）。
+- (BOOL) RespringAndReport;
 
 @end

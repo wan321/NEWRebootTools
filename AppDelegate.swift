@@ -106,47 +106,62 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     private func executeRebootURL(_ url: URL) {
         guard let action = rebootURLAction(from: url), !rebootURLHandled else { return }
         rebootURLHandled = true
-        logDiagnostic("URL received: \(url.absoluteString) → \(action.rawValue)")
+        logDiagnostic("URL received: \(url.absoluteString) → \(action.rawValue) uid=\(getuid())")
 
-        // 留出时间让 App 完成前台切换，再调用对应的 Helper。
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self = self else { return }
-            let deviceController = DeviceController()
-
-            switch action {
-            case .respring:
-                // 注销不经过 Helper，直接杀 SpringBoard；此调用内部会 exit(0)。
-                self.logDiagnostic("respring: sending SIGTERM to SpringBoard")
-                deviceController.respring()
-            case .reboot, .userspace:
-                let success = action == .reboot
-                    ? deviceController.rebootDevice()
-                    : deviceController.rebootUserspace()
-                let detail = "\(action.rawValue): helper \(success ? "spawn ok" : "spawn FAILED") exit=\(deviceController.lastExitCode) \(String(describing: deviceController.lastLog ?? ""))"
-                self.logDiagnostic(detail)
-
-                // 如果 Helper 启动失败，弹出提示（原实现是静默失败），并允许再次调用 URL 重试。
-                if !success {
-                    self.rebootURLHandled = false
-                    self.showFailureAlert(action: action, detail: detail)
-                }
-            }
+        // 先把「到底收到了哪个动作」摆在屏幕上，再执行。真机排查时这一层确认
+        // 能立刻区分「快捷指令填错了」和「动作执行失败」。
+        showReceiptAlert(action: action, url: url) { [weak self] in
+            self?.perform(action: action)
         }
     }
 
-    /// 失败时给出可见反馈：helper 起不来时（常见于缺少 platform-application 或 reboot 权限）
-    /// 原来只在 NSLog 里留一行，侧载环境看不到，表现为“点了什么都没发生”。
+    private func perform(action: RebootURLAction) {
+        let deviceController = DeviceController()
+        let detail: String
+
+        switch action {
+        case .respring:
+            // 注销不经过 Helper；只有一个 SpringBoard 都没杀掉时才会返回。
+            _ = deviceController.respringAndReport()
+            detail = "\(action.rawValue): \(String(describing: deviceController.lastLog ?? ""))"
+        case .reboot, .userspace:
+            let spawned = action == .reboot
+                ? deviceController.rebootDevice()
+                : deviceController.rebootUserspace()
+            // 走到这里说明设备没有重启（重置成功的话进程早就被内核干掉了），
+            // 所以不论 spawn 成功与否都要把 helper 的退出码和 stderr 显示出来。
+            detail = "\(action.rawValue): spawn \(spawned ? "ok" : "FAILED") exit=\(deviceController.lastExitCode) \(String(describing: deviceController.lastLog ?? ""))"
+        }
+
+        logDiagnostic(detail)
+        rebootURLHandled = false
+        showFailureAlert(action: action, detail: detail)
+    }
+
+    /// 执行前的确认闪窗：显示收到的 URL、解析出的动作、App 的 uid。
+    private func showReceiptAlert(action: RebootURLAction, url: URL, completion: @escaping () -> Void) {
+        let message = "\(url.absoluteString)\n动作：\(action.displayName)　uid=\(getuid())"
+        let alert = UIAlertController(title: "已收到 RebootTools 请求", message: message, preferredStyle: .alert)
+        presenter()?.present(alert, animated: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            alert.dismiss(animated: false) { completion() }
+        }
+    }
+
+    private func presenter() -> UIViewController? {
+        return window?.rootViewController?.presentedViewController ?? window?.rootViewController
+    }
+
+    /// 失败/未生效时给出可见反馈。
     private func showFailureAlert(action: RebootURLAction, detail: String) {
-        let message = "「\(action.displayName)」未能执行。\n\n\(detail)"
+        let message = "「\(action.displayName)」未能生效。\n\n\(detail)"
         let alert = UIAlertController(title: "RebootTools", message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "好", style: .default))
         alert.addAction(UIAlertAction(title: "复制详情", style: .default) { _ in
             UIPasteboard.general.string = detail
         })
         DispatchQueue.main.async {
-            let presenter = self.window?.rootViewController?.presentedViewController
-                ?? self.window?.rootViewController
-            presenter?.present(alert, animated: true)
+            self.presenter()?.present(alert, animated: true)
         }
     }
 

@@ -1,5 +1,7 @@
 #import "DeviceController.h"
 #include <spawn.h>
+#include <signal.h>
+#include <unistd.h>
 #import <sys/sysctl.h>
 #import <Foundation/Foundation.h>
 #import <FrontBoardServices/FBSSystemService.h>
@@ -8,10 +10,12 @@
 {
 	int _lastExitCode;
 	NSString *_lastLog;
+	int _lastKilledCount;
 }
 
 @synthesize lastExitCode = _lastExitCode;
 @synthesize lastLog = _lastLog;
+@synthesize lastKilledCount = _lastKilledCount;
 
 #define POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE 1
 extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t* __restrict, uid_t, uint32_t);
@@ -77,6 +81,34 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restric
 {
 	killall(@"SpringBoard", YES);
 	exit(0);
+}
+
+// 统计式注销：kill 失败时不再 exit(0)，否则「App 退出回桌面」会被误认成注销成功。
+- (BOOL) RespringAndReport
+{
+	__block int killed = 0;
+	__block int lastErr = 0;
+	enumerateProcessesUsingBlock(^(pid_t pid, NSString* executablePath, BOOL* stop)
+	{
+		if ([executablePath.lastPathComponent isEqualToString:@"SpringBoard"])
+		{
+			if (kill(pid, SIGTERM) == 0) {
+				killed++;
+			} else {
+				lastErr = errno;
+			}
+		}
+	});
+
+	_lastKilledCount = killed;
+	_lastExitCode = (killed > 0) ? 0 : (lastErr ? lastErr : -1);
+	_lastLog = [NSString stringWithFormat:@"respring killed=%d errno=%d uid=%u euid=%u",
+				killed, lastErr, getuid(), geteuid()];
+
+	if (killed > 0) {
+		exit(0);
+	}
+	return NO;
 }
 
 // @See https://github.com/opa334/TrollStore/blob/main/Shared/TSUtil.m#L79
