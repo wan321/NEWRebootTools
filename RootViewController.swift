@@ -287,17 +287,30 @@ class RootViewController: UIViewController {
         } else {
             text += "身份探测 未运行（点上面「运行 root 探测」）\n"
         }
+        // 自检记录放在最前面：面板放不下时用户不用滚动就能看到崩溃现场。
         text += """
+        --- probe.log 尾部 ---
+        \(RootViewController.probeTail())
         --- install.log ---
-        \(DaemonManager.logTail(DaemonManager.installLogPath, lines: 3))
+        \(DaemonManager.logTail(DaemonManager.installLogPath, lines: 2))
         --- daemon.log ---
-        \(DaemonManager.logTail(DaemonManager.daemonLogPath, lines: 3))
+        \(DaemonManager.logTail(DaemonManager.daemonLogPath, lines: 2))
         --- URL 日志尾部 ---
         \(RootViewController.logTail())
         --- 启动面包屑 ---
         \(RootViewController.bootTail())
         """
         diagTextView.text = text
+    }
+
+    /// 读 Documents/probe.log 尾部：v12 自检阶梯的最后几行，
+    /// 「运行 root 探测」闪退后重新打开 App，看这里就能知道死在哪一级。
+    private static func probeTail() -> String {
+        let file = NSHomeDirectory() + "/Documents/probe.log"
+        guard let content = try? String(contentsOfFile: file, encoding: .utf8), !content.isEmpty else {
+            return "(无自检记录)"
+        }
+        return content.split(separator: "\n").suffix(12).joined(separator: "\n")
     }
 
     /// 显式触发的身份探测（不改动设备）。崩溃排查用：进入前后都写启动面包屑，
@@ -311,11 +324,12 @@ class RootViewController: UIViewController {
 
         DispatchQueue.global(qos: .userInitiated).async {
             let controller = DeviceController()
-            let ok = controller.probeHelperIdentity()
+            // v12：跑四级自检阶梯（echo 无管道 / echo 有管道 / helper 带 persona /
+            // helper 不带 persona），每一步都先 fsync 到 Documents/probe.log。
+            let ok = controller.selfTest()
             let exit = controller.lastExitCode
-            let log = controller.lastLog ?? ""
             DaemonManager.bootLog("probe-done")
-            let result = "exit=\(exit) \(ok ? "ok" : "FAILED") \(log)"
+            let result = "selftest=\(ok ? "ok" : "FAILED") lastExit=\(exit)"
 
             DispatchQueue.main.async {
                 self.probing = false

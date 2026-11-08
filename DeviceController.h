@@ -15,6 +15,10 @@
 /// 只把 RootHelper 以 root 身份跑起来并读回它的 uid/euid，不重启设备。
 /// 用来验证 posix_spawn persona 提权是否真的生效（返回值仅代表 spawn 是否成功）。
 - (BOOL) probeHelperIdentity;
+/// v12：四级 spawn 自检阶梯（echo 无管道 → echo 有管道 → helper 带 persona →
+/// helper 不带 persona），每一步开始前 fsync 一行到 Documents/probe.log。
+/// 「运行 root 探测」闪退时，靠这个文件能定位死在哪一级、哪个 syscall。
+- (BOOL) selfTest;
 /// 以 root 身份执行 `RebootRootHelper install-daemon <daemon> <plist>`，
 /// 把 RebootDaemon 装进 /usr/libexec 并注册为开机自启的 launchd 守护进程。
 /// v8 起默认只落盘不调用 launchctl（spawn launchctl 是最可疑的闪退来源），

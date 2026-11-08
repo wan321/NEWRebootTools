@@ -2,6 +2,9 @@
 #include <spawn.h>
 #include <signal.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <string.h>
 #import <sys/sysctl.h>
 #import <Foundation/Foundation.h>
 #import <FrontBoardServices/FBSSystemService.h>
@@ -38,6 +41,33 @@ static void SetOwnedString(NSString **slot, NSString *value)
 	[_lastLog release];
 	[super dealloc];
 }
+
+// ---------------- v12 崩溃定位探针 ----------------
+// 「运行 root 探测」会闪退，而闪退点必须能在崩溃前落到磁盘上才有用：
+// 每次 open/append/write/fsync/close，绝不经过任何内存缓冲。
+static void ProbeLog(const char *fmt, ...)
+{
+	char line[512];
+	va_list ap;
+	va_start(ap, fmt);
+	int n = vsnprintf(line, sizeof(line) - 2, fmt, ap);
+	va_end(ap);
+	if (n < 0) return;
+	if (n > (int)sizeof(line) - 2) n = (int)sizeof(line) - 2;
+	line[n++] = '\n';
+	line[n] = 0;
+
+	NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/probe.log"];
+	int fd = open([path UTF8String], O_WRONLY | O_CREAT | O_APPEND, 0644);
+	if (fd < 0) return;
+	ssize_t ignored = write(fd, line, (size_t)n);
+	(void)ignored;
+	fsync(fd);
+	close(fd);
+}
+
+// 自检阶梯用：跳过 persona 属性设置，验证「不提权」时是否同样崩。
+static BOOL gSpawnSkipPersona = NO;
 
 #define POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE 1
 extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t* __restrict, uid_t, uint32_t);
@@ -185,48 +215,81 @@ int spawnRoot(NSString* path, NSArray* args, NSString** stdOut, NSString** stdEr
     }
     argsC[argCount] = NULL;
 
+    ProbeLog("[spawn] begin path=%s argc=%lu skipPersona=%d pipes=%d", [path UTF8String], (unsigned long)argCount, (int)gSpawnSkipPersona, (stdOut || stdErr) ? 1 : 0);
+
     posix_spawnattr_t attr;
+    ProbeLog("[spawn] before attr_init");
     posix_spawnattr_init(&attr);
+    ProbeLog("[spawn] after attr_init");
 
     // 这三个调用决定 helper 能不能拿到 root：persona 覆盖需要
     // com.apple.private.persona-mgmt，且必须被内核真正接受。
     // 原来直接忽略返回值，失败时 helper 会以 mobile 身份静默运行，
     // reboot(0) 必然 EPERM —— 这正是「点了没反应」最难查的一层。
-    errno = 0;
-    int personaErr = posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
-    int personaErrno = errno;
-    errno = 0;
-    int personaUidErr = posix_spawnattr_set_persona_uid_np(&attr, 0);
-    int personaUidErrno = errno;
-    errno = 0;
-    int personaGidErr = posix_spawnattr_set_persona_gid_np(&attr, 0);
-    int personaGidErrno = errno;
+    int personaErr = -999, personaErrno = 0;
+    int personaUidErr = -999, personaUidErrno = 0;
+    int personaGidErr = -999, personaGidErrno = 0;
+    if (!gSpawnSkipPersona)
+    {
+        errno = 0;
+        ProbeLog("[spawn] before persona_np");
+        personaErr = posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
+        personaErrno = errno;
+        ProbeLog("[spawn] after persona_np ret=%d errno=%d", personaErr, personaErrno);
+        errno = 0;
+        ProbeLog("[spawn] before persona_uid");
+        personaUidErr = posix_spawnattr_set_persona_uid_np(&attr, 0);
+        personaUidErrno = errno;
+        ProbeLog("[spawn] after persona_uid ret=%d errno=%d", personaUidErr, personaUidErrno);
+        errno = 0;
+        ProbeLog("[spawn] before persona_gid");
+        personaGidErr = posix_spawnattr_set_persona_gid_np(&attr, 0);
+        personaGidErrno = errno;
+        ProbeLog("[spawn] after persona_gid ret=%d errno=%d", personaGidErr, personaGidErrno);
+    }
+    else
+    {
+        ProbeLog("[spawn] persona skipped");
+    }
 
     SetOwnedString(&gPersonaLog, [NSString stringWithFormat:@"app uid=%d euid=%d | persona set=%d(errno=%d) uid=%d(errno=%d) gid=%d(errno=%d)", getuid(), geteuid(), personaErr, personaErrno, personaUidErr, personaUidErrno, personaGidErr, personaGidErrno]);
 
     posix_spawn_file_actions_t action;
     posix_spawn_file_actions_init(&action);
 
-    int outErr[2];
+    int outErr[2] = {-1, -1};
+    int out[2] = {-1, -1};
     if(stdErr)
     {
-        pipe(outErr);
-        posix_spawn_file_actions_adddup2(&action, outErr[1], STDERR_FILENO);
-        posix_spawn_file_actions_addclose(&action, outErr[0]);
+        ProbeLog("[spawn] before pipe(stderr)");
+        if (pipe(outErr) == 0) {
+            posix_spawn_file_actions_adddup2(&action, outErr[1], STDERR_FILENO);
+            posix_spawn_file_actions_addclose(&action, outErr[0]);
+        } else {
+            ProbeLog("[spawn] pipe(stderr) failed errno=%d", errno);
+        }
+        ProbeLog("[spawn] after pipe(stderr) fd=%d,%d", outErr[0], outErr[1]);
     }
 
-    int out[2];
     if(stdOut)
     {
-        pipe(out);
-        posix_spawn_file_actions_adddup2(&action, out[1], STDOUT_FILENO);
-        posix_spawn_file_actions_addclose(&action, out[0]);
+        ProbeLog("[spawn] before pipe(stdout)");
+        if (pipe(out) == 0) {
+            posix_spawn_file_actions_adddup2(&action, out[1], STDOUT_FILENO);
+            posix_spawn_file_actions_addclose(&action, out[0]);
+        } else {
+            ProbeLog("[spawn] pipe(stdout) failed errno=%d", errno);
+        }
+        ProbeLog("[spawn] after pipe(stdout) fd=%d,%d", out[0], out[1]);
     }
 
     pid_t task_pid;
     int status = -200;
+    ProbeLog("[spawn] before posix_spawn");
     int spawnError = posix_spawn(&task_pid, [path UTF8String], &action, &attr, (char* const*)argsC, NULL);
+    ProbeLog("[spawn] after posix_spawn ret=%d pid=%d", spawnError, (int)task_pid);
     posix_spawnattr_destroy(&attr);
+    posix_spawn_file_actions_destroy(&action);
     for (NSUInteger i = 0; i < argCount; i++)
     {
         free(argsC[i]);
@@ -276,10 +339,13 @@ int spawnRoot(NSString* path, NSArray* args, NSString** stdOut, NSString** stdEr
 
     do
     {
+        ProbeLog("[spawn] before waitpid");
         if (waitpid(task_pid, &status, 0) != -1) {
+            ProbeLog("[spawn] after waitpid exited=%d status=%d", WIFEXITED(status) ? WEXITSTATUS(status) : -1, status);
             NSLog(@"Child status %d", WEXITSTATUS(status));
         } else
         {
+            ProbeLog("[spawn] waitpid failed errno=%d", errno);
             perror("waitpid");
             _isRunning = NO;
             return -222;
@@ -299,7 +365,9 @@ int spawnRoot(NSString* path, NSArray* args, NSString** stdOut, NSString** stdEr
         }
 
         // wait for logging queue to finish
+        ProbeLog("[spawn] before semaphore_wait");
         dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+        ProbeLog("[spawn] after semaphore_wait");
 
         if(stdOut)
         {
@@ -311,6 +379,7 @@ int spawnRoot(NSString* path, NSArray* args, NSString** stdOut, NSString** stdEr
         }
     }
 
+    ProbeLog("[spawn] end exit=%d", WEXITSTATUS(status));
     return WEXITSTATUS(status);
 }
 
@@ -320,7 +389,9 @@ NSString* getNSStringFromFile(int fd)
     ssize_t num_read;
     char c;
     if(!fd_is_valid(fd)) return @"";
-    while((num_read = read(fd, &c, sizeof(c))))
+    // 必须显式处理 num_read <= 0：read 出错返回 -1（真值），原写法会死循环往
+    // 字符串里塞垃圾直到进程被杀。
+    while((num_read = read(fd, &c, sizeof(c))) == 1)
     {
         [ms appendString:[NSString stringWithFormat:@"%c", c]];
         if(c == '\n') break;
@@ -399,6 +470,51 @@ void enumerateProcessesUsingBlock(void (^enumerator)(pid_t pid, NSString* execut
 		}
 	}
 	free(info);
+}
+
+// ---------------- v12 自检阶梯 ----------------
+// 「运行 root 探测」会闪退，用四级阶梯把崩溃点夹到最小范围。每一步开始前
+// 先 fsync 一行到 Documents/probe.log，所以即使用户看到的只是闪退，
+// 重新打开 App 也能从面板底部看到死在哪一级、死在哪一个 syscall。
+- (BOOL) selfTest
+{
+	ProbeLog("=== selftest begin ===");
+	NSString *helper = [[NSBundle mainBundle] pathForResource:@"RebootRootHelper" ofType:@""];
+	ProbeLog("[t0] helper=%s bundle=%s", helper ? [helper UTF8String] : "(nil)", [[[NSBundle mainBundle] bundlePath] UTF8String]);
+
+	NSString *o = nil;
+	NSString *e = nil;
+
+	// 1：不接管管道（不建 dispatch 队列/信号量），只看 posix_spawn 本身
+	ProbeLog("[t1] echo nopipe start");
+	int r1 = spawnRoot(@"/bin/echo", @[@"v12-t1"], NULL, NULL);
+	ProbeLog("[t1] echo nopipe end exit=%d", r1);
+
+	// 2：接管管道 → 建日志队列 + 信号量
+	ProbeLog("[t2] echo pipe start");
+	int r2 = spawnRoot(@"/bin/echo", @[@"v12-t2"], &o, &e);
+	ProbeLog("[t2] echo pipe end exit=%d out=%s err=%s", r2, o ? [o UTF8String] : "(nil)", e ? [e UTF8String] : "(nil)");
+	o = nil; e = nil;
+
+	// 3：真正的 helper（提权 + 管道）
+	if (helper == nil) {
+		ProbeLog("[t3] helper missing, skip");
+	} else {
+		ProbeLog("[t3] helper whoami persona start");
+		int r3 = spawnRoot(helper, @[@"whoami"], &o, &e);
+		ProbeLog("[t3] helper whoami persona end exit=%d out=%s err=%s", r3, o ? [o UTF8String] : "(nil)", e ? [e UTF8String] : "(nil)");
+		o = nil; e = nil;
+
+		// 4：同样的 helper，但完全不设 persona（不提权）
+		gSpawnSkipPersona = YES;
+		ProbeLog("[t4] helper whoami nopersona start");
+		int r4 = spawnRoot(helper, @[@"whoami"], &o, &e);
+		gSpawnSkipPersona = NO;
+		ProbeLog("[t4] helper whoami nopersona end exit=%d out=%s err=%s", r4, o ? [o UTF8String] : "(nil)", e ? [e UTF8String] : "(nil)");
+	}
+
+	ProbeLog("=== selftest end ===");
+	return YES;
 }
 
 @end
