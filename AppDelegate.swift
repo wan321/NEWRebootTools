@@ -62,6 +62,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     ) -> Bool {
         guard isRebootURL(url) else { return false }
 
+        // 无论冷启动还是从后台被唤起，都要打标记，避免 RootViewController 的
+        // “打开 App 自动操作” 与 URL 请求重复触发（例如自动操作设成注销时会被误触发）。
+        launchedByRebootURL = true
+
         if application.applicationState == .active {
             executeRebootURL(url)
         } else {
