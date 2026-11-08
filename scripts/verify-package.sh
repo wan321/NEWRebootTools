@@ -21,7 +21,7 @@ test -d "$app" || { echo 'Payload/RebootTools.app is missing.' >&2; exit 1; }
 for helper in RebootRootHelper RebootUserSpaceHelper; do
   test -s "$app/$helper" || { echo "$helper is missing from the built app bundle." >&2; exit 1; }
   test -x "$app/$helper" || { echo "$helper lost executable permission in the app bundle." >&2; exit 1; }
-  lipo -verify_arch arm64 "$app/$helper"
+  lipo "$app/$helper" -verify_arch arm64
 done
 /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$app/Info.plist" | grep -qx 'reboottools'
 cp "$source_package" dist/RebootTools-Shortcuts.tipa
