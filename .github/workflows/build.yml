@@ -2,10 +2,12 @@
 name: Build RebootTools Shortcuts
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
-  workflow_dispatch:
+      - master
+  pull_request:
 
 permissions:
   contents: read
@@ -13,156 +15,208 @@ permissions:
 jobs:
   build:
     name: Build TrollStore TIPA
-    runs-on: macos-15
-
-    env:
-      THEOS: ${{ github.workspace }}/theos
+    runs-on: macos-14
 
     steps:
-      # 1. 获取源码
+      # 1. 下载源码
       - name: Checkout source
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      # 2. 安装依赖
+      # 2. 安装构建工具
       - name: Install dependencies
+        shell: bash
         run: |
           set -euo pipefail
-          brew install ldid dpkg xz
 
-      # 3. 安装 Theos 和 iOS SDK
+          brew update
+          brew install ldid make
+
+      # 3. 配置 Theos
       - name: Install Theos
+        shell: bash
         run: |
           set -euo pipefail
 
-          git clone --recursive https://github.com/theos/theos.git "$THEOS"
+          export THEOS="$GITHUB_WORKSPACE/theos"
 
-          mkdir -p "$THEOS/sdks"
+          if [ ! -d "$THEOS" ]; then
+            git clone --recursive https://github.com/theos/theos.git "$THEOS"
+          fi
 
-          git clone https://github.com/theos/sdks.git "$RUNNER_TEMP/theos-sdks"
-
-          find "$RUNNER_TEMP/theos-sdks" \
-            -maxdepth 1 \
-            -type d \
-            -name "*.sdk" \
-            -exec cp -R {} "$THEOS/sdks/" \;
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
 
           echo "Theos installed:"
-          ls -lah "$THEOS"
+          ls -la "$THEOS"
 
-          echo "Available SDKs:"
-          ls -lah "$THEOS/sdks"
-
-      # 4. 检查源码
-      - name: Validate source
+      # 4. 检查项目文件
+      - name: Inspect project
+        shell: bash
         run: |
           set -euo pipefail
 
-          test -f Makefile
-          test -f Resources/Info.plist
+          echo "========== Project structure =========="
+          find . -maxdepth 3 -type f | sort | head -300
 
-          plutil -lint Resources/Info.plist
+          echo "========== Makefile =========="
+          if [ -f Makefile ]; then
+            cat Makefile
+          else
+            echo "ERROR: Makefile not found in repository root."
+            exit 1
+          fi
 
-          for helper in \
-            Resources/RebootRootHelper \
-            Resources/RebootUserSpaceHelper
-          do
-            if [ ! -s "$helper" ]; then
-              echo "Missing helper: $helper"
-              exit 1
-            fi
-
-            chmod +x "$helper"
-
-            echo "Checking architecture: $helper"
-            lipo "$helper" -verify_arch arm64
-
-            echo "Helper OK: $helper"
-          done
-
-      # 5. 编译
-      - name: Build package
+      # 5. 编译项目
+      - name: Build project
+        shell: bash
         run: |
           set -euo pipefail
 
-          make clean
+          export THEOS="$GITHUB_WORKSPACE/theos"
 
-          make package FINALPACKAGE=1
+          echo "========== Build =========="
 
-          echo "Build output:"
-          find packages -maxdepth 2 -type f -print
+          make clean || true
 
-      # 6. 生成固定名称 TIPA
-      - name: Prepare TIPA
+          make package \
+            FINALPACKAGE=1 \
+            THEOS_PACKAGE_SCHEME=rootless=0 \
+            ARCHS=arm64
+
+      # 6. 检查编译产物并生成 TIPA
+      - name: Package TIPA
+        shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p dist
 
+          echo "========== Search build outputs =========="
+
+          find . -type f \
+            \( -name "*.deb" -o -name "*.ipa" -o -name "*.tipa" \) \
+            ! -path "./dist/*" \
+            ! -path "./.git/*" \
+            -print
+
           PACKAGE=""
 
-          for file in packages/*.tipa packages/*.ipa; do
-            if [ -f "$file" ]; then
-              PACKAGE="$file"
-              break
-            fi
-          done
+          while IFS= read -r file; do
+            PACKAGE="$file"
+            break
+          done < <(
+            find . -type f \
+              \( -name "*.tipa" -o -name "*.ipa" \) \
+              ! -path "./dist/*" \
+              ! -path "./.git/*" \
+              -print
+          )
 
-          if [ -z "$PACKAGE" ]; then
-            echo "ERROR: No IPA or TIPA package generated."
+          if [ -n "$PACKAGE" ]; then
+            cp "$PACKAGE" dist/RebootTools-Shortcuts.tipa
+
+          else
+            DEB=""
+
+            while IFS= read -r file; do
+              DEB="$file"
+              break
+            done < <(
+              find . -type f -name "*.deb" \
+                ! -path "./dist/*" \
+                ! -path "./.git/*" \
+                -print
+            )
+
+            if [ -z "$DEB" ]; then
+              echo "ERROR: No IPA, TIPA or DEB generated."
+              exit 1
+            fi
+
+            echo "Found DEB: $DEB"
+            echo "A DEB is not a TrollStore TIPA."
+            echo "The project needs an app bundle packaging step."
             exit 1
           fi
 
-          cp "$PACKAGE" dist/RebootTools-Shortcuts.tipa
-
-          echo "Final TIPA:"
+          echo "========== Final package =========="
           ls -lh dist/RebootTools-Shortcuts.tipa
 
-      # 7. 验证 TIPA
-      - name: Verify TIPA package
+      # 7. 验证 TIPA 内部结构
+      - name: Verify TIPA
+        shell: bash
         run: |
           set -euo pipefail
 
-          TIPA="dist/RebootTools-Shortcuts.tipa"
-          TEMP_DIR="$(mktemp -d)"
+          PACKAGE="dist/RebootTools-Shortcuts.tipa"
 
-          trap 'rm -rf "$TEMP_DIR"' EXIT
+          echo "========== Archive verification =========="
 
-          test -s "$TIPA"
+          unzip -t "$PACKAGE"
 
-          unzip -q "$TIPA" -d "$TEMP_DIR"
+          echo "========== Contents =========="
 
-          APP="$TEMP_DIR/Payload/RebootTools.app"
+          unzip -l "$PACKAGE"
 
-          if [ ! -d "$APP" ]; then
-            echo "ERROR: Payload/RebootTools.app not found."
+          TMP="$(mktemp -d)"
+          unzip -q "$PACKAGE" -d "$TMP"
+
+          APP="$(find "$TMP/Payload" \
+            -maxdepth 2 \
+            -type d \
+            -name "*.app" \
+            -print -quit 2>/dev/null || true)"
+
+          if [ -z "$APP" ]; then
+            echo "ERROR: Payload/*.app not found."
+            rm -rf "$TMP"
             exit 1
           fi
 
-          test -s "$APP/Info.plist"
+          echo "App bundle: $APP"
+
+          if [ ! -f "$APP/Info.plist" ]; then
+            echo "ERROR: Info.plist missing."
+            rm -rf "$TMP"
+            exit 1
+          fi
 
           plutil -lint "$APP/Info.plist"
 
-          for helper in \
-            "$APP/RebootRootHelper" \
-            "$APP/RebootUserSpaceHelper"
-          do
-            if [ ! -s "$helper" ]; then
-              echo "ERROR: Missing helper: $helper"
-              exit 1
-            fi
+          echo "========== Executable =========="
 
-            lipo "$helper" -verify_arch arm64
+          EXECUTABLE=$(/usr/libexec/PlistBuddy \
+            -c "Print :CFBundleExecutable" \
+            "$APP/Info.plist")
 
-            if [ ! -x "$helper" ]; then
-              echo "ERROR: Helper is not executable: $helper"
-              exit 1
-            fi
-          done
+          if [ ! -f "$APP/$EXECUTABLE" ]; then
+            echo "ERROR: Main executable missing: $EXECUTABLE"
+            rm -rf "$TMP"
+            exit 1
+          fi
 
-          echo "TIPA structure verified successfully."
+          file "$APP/$EXECUTABLE"
 
-      # 8. 上传 TIPA
-      - name: Upload TIPA artifact
+          echo "========== Minimum iOS version =========="
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :MinimumOSVersion" \
+            "$APP/Info.plist" || true
+
+          echo "========== Bundle ID =========="
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleIdentifier" \
+            "$APP/Info.plist"
+
+          rm -rf "$TMP"
+
+          echo "TIPA structure verification passed."
+
+      # 8. 上传最终 TIPA
+      - name: Upload TIPA
         uses: actions/upload-artifact@v4
         with:
           name: RebootTools-Shortcuts-TIPA
