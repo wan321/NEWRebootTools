@@ -70,7 +70,7 @@ static int runCommand(NSString *command)
 	return -1;
 }
 
-static int installDaemon(NSString *daemonSrc, NSString *plistSrc)
+static int installDaemon(NSString *daemonSrc, NSString *plistSrc, BOOL shouldLoad)
 {
 	NSFileManager *fm = [NSFileManager defaultManager];
 
@@ -118,6 +118,14 @@ static int installDaemon(NSString *daemonSrc, NSString *plistSrc)
 
 	installLogAppend(@"文件已就位：/usr/libexec/RebootDaemon + /Library/LaunchDaemons/com.wan.reboottools.daemon.plist");
 
+	// v8：默认不碰 launchctl。曾怀疑「App 启动时 spawn 出以 root 跑的 launchctl」
+	// 会连带把前台 App 一起干掉（表现为点开闪退），所以安装只做落盘，激活交给下一次
+	// 开机/用户空间重启时 launchd 自己加载（plist 里有 RunAtLoad）。
+	if (!shouldLoad) {
+		installLogAppend(@"跳过 launchctl（落盘完成，重启一次后 launchd 会自动加载）");
+		return 0;
+	}
+
 	// iOS 13+ 用 bootstrap system；老版本回退到 load -w。
 	int rc = runCommand(@"launchctl bootstrap system /Library/LaunchDaemons/com.wan.reboottools.daemon.plist");
 	BOOL ok = (rc == 0);
@@ -145,10 +153,13 @@ int main(int argc, char *argv[], char *envp[])
 			return uid == 0 ? 0 : 2;
 		}
 
-		// install-daemon <daemonPath> <plistPath>
+		// install-daemon <daemonPath> <plistPath> [--load]
+		// 默认只落盘不加载：加载（spawn launchctl）是最可疑的闪退来源，改成可选。
 		if (argc > 3 && strcmp(argv[1], "install-daemon") == 0) {
+			BOOL shouldLoad = (argc > 4 && strcmp(argv[4], "--load") == 0);
 			return installDaemon([NSString stringWithUTF8String:argv[2]],
-								 [NSString stringWithUTF8String:argv[3]]);
+								 [NSString stringWithUTF8String:argv[3]],
+								 shouldLoad);
 		}
 
 		if (uid != 0) {

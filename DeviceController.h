@@ -17,7 +17,10 @@
 - (BOOL) probeHelperIdentity;
 /// 以 root 身份执行 `RebootRootHelper install-daemon <daemon> <plist>`，
 /// 把 RebootDaemon 装进 /usr/libexec 并注册为开机自启的 launchd 守护进程。
+/// v8 起默认只落盘不调用 launchctl（spawn launchctl 是最可疑的闪退来源），
+/// 激活交给下次开机时 launchd 自动加载；需要立即加载时用 load:YES。
 - (BOOL) installRootDaemon:(NSString *)daemonPath plistPath:(NSString *)plistPath;
+- (BOOL) installRootDaemon:(NSString *)daemonPath plistPath:(NSString *)plistPath load:(BOOL)load;
 - (void) Respring;
 /// 与 Respring 相同，但会统计真正杀掉了几个 SpringBoard：一个都没杀掉时不 exit，
 /// 让上层能把「注销其实没成功」显示出来（旧实现无论 kill 成功与否都 exit(0)，

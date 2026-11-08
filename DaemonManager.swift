@@ -47,8 +47,10 @@ final class DaemonManager: NSObject {
     }
 
     /// 尝试用 root helper 安装/更新 daemon。返回 (spawn 是否成功, exit, 日志)。
-    static func installIfNeeded() -> (Bool, Int, String) {
-        if installAttempted {
+    /// v8：默认只落盘、不调用 launchctl（load = false），因为「App 启动即 spawn 一个
+    /// 以 root 跑的 launchctl」是 v7 点开就闪退的头号嫌疑。activate 交给下次开机。
+    static func install(force: Bool = false, load: Bool = false) -> (Bool, Int, String) {
+        if installAttempted && !force {
             return (false, -1, "本次启动已尝试过安装")
         }
         installAttempted = true
@@ -60,8 +62,24 @@ final class DaemonManager: NSObject {
         }
 
         let controller = DeviceController()
-        let ok = controller.installRootDaemon(daemon, plistPath: plist)
+        let ok = controller.installRootDaemon(daemon, plistPath: plist, load: load)
         return (ok, Int(controller.lastExitCode), controller.lastLog ?? "")
+    }
+
+    /// 启动阶段面包屑：v7 在真机上点开就闪退，而闪退前的最后一行只能靠这个留下痕迹。
+    /// 每次冷启动重写，避免历史噪音。
+    static func bootLog(_ stage: String, reset: Bool = false) {
+        let path = NSHomeDirectory() + "/Documents/boot.log"
+        let line = String(format: "%.3f %@\n", Date().timeIntervalSince1970, stage)
+        if reset || !FileManager.default.fileExists(atPath: path) {
+            try? line.write(toFile: path, atomically: true, encoding: .utf8)
+            return
+        }
+        if let fh = FileHandle(forWritingAtPath: path) {
+            fh.seekToEndOfFile()
+            fh.write(line.data(using: .utf8) ?? Data())
+            fh.closeFile()
+        }
     }
 
     /// 给 daemon 投递命令；daemon 会立刻删掉命令文件，所以这是"一次性"的。

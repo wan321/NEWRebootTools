@@ -11,9 +11,13 @@ class RootViewController: UIViewController {
     // 常驻诊断面板：启动即自动探测 root 能力，结果直接显示在屏幕上，
     // 不依赖 URL Scheme 是否送达、也不依赖弹窗是否被看见。
     private let diagTextView = UITextView()
+    // v8：安装 root 守护进程从「启动自动跑」改成「按钮显式触发」。
+    private let installDaemonButton = UIButton(type: .system)
+    private var installingDaemon = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        DaemonManager.bootLog("viewDidLoad")
         
         self.title = NSLocalizedString("CFBundleDisplayName", comment: "")
 
@@ -139,6 +143,15 @@ class RootViewController: UIViewController {
         diagTextView.textContainerInset = UIEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
         self.view.addSubview(diagTextView)
 
+        // 手动安装/更新 root 守护进程（v8 起不再在启动时自动执行）
+        installDaemonButton.translatesAutoresizingMaskIntoConstraints = false
+        installDaemonButton.setTitle("安装 root 守护进程", for: .normal)
+        installDaemonButton.titleLabel?.font = UIFont.systemFont(ofSize: 12)
+        installDaemonButton.backgroundColor = .secondarySystemBackground
+        installDaemonButton.layer.cornerRadius = 6
+        installDaemonButton.addTarget(self, action: #selector(installDaemonTapped), for: .touchUpInside)
+        self.view.addSubview(installDaemonButton)
+
         // AutoLayout
         NSLayoutConstraint.activate([
             iconImageView.widthAnchor.constraint(equalToConstant: 100),  // 设置宽度
@@ -178,7 +191,12 @@ class RootViewController: UIViewController {
             diagTextView.leadingAnchor.constraint(equalTo: self.view.leadingAnchor, constant: 12),
             diagTextView.trailingAnchor.constraint(equalTo: self.view.trailingAnchor, constant: -12),
             diagTextView.bottomAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
-            diagTextView.heightAnchor.constraint(equalToConstant: 168)
+            diagTextView.heightAnchor.constraint(equalToConstant: 168),
+
+            installDaemonButton.leadingAnchor.constraint(equalTo: diagTextView.leadingAnchor),
+            installDaemonButton.trailingAnchor.constraint(equalTo: diagTextView.trailingAnchor),
+            installDaemonButton.heightAnchor.constraint(equalToConstant: 30),
+            installDaemonButton.bottomAnchor.constraint(equalTo: diagTextView.topAnchor, constant: -6)
         ])
 
     }
@@ -222,30 +240,22 @@ class RootViewController: UIViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        DaemonManager.bootLog("viewDidAppear")
         refreshDiagnostics()
     }
 
     /// 启动即自动跑一次身份探测（不改动设备），把结果常驻在屏幕下方。
     /// 这样即使 URL Scheme 没送达、弹窗被错过，只要打开 App 也能看到一手数据。
+    /// v8：启动时**不再**自动安装 daemon——安装改成面板上方按钮显式触发，
+    /// 以免「点开就闪退」这种问题没有 App 可用（v7 里安装是在 viewDidAppear 自动跑的）。
     private func refreshDiagnostics() {
         let build = AppDelegate.buildTag
         let appUid = getuid()
         let appEuid = geteuid()
         let permission = settingsUtils.checkInstallPermission()
-        diagTextView.text = "构建 \(build)\nApp uid=\(appUid) euid=\(appEuid)\n权限检查=\(permission)\ndaemon 初始化中…"
+        diagTextView.text = "构建 \(build)\nApp uid=\(appUid) euid=\(appEuid)\n权限检查=\(permission)\ndaemon 探测中…"
 
         DispatchQueue.global(qos: .userInitiated).async {
-            // 首次运行尝试把 root 守护进程装进系统（这一步仍然需要 helper 真的拿到 root）。
-            var installLine = ""
-            let before = DaemonManager.status()
-            if before.alive {
-                installLine = "安装=已在线，跳过"
-            } else {
-                let (spawned, exit, log) = DaemonManager.installIfNeeded()
-                let first = log.split(separator: "\n").first.map(String.init) ?? log
-                installLine = "安装 spawn=\(spawned ? "ok" : "FAILED") exit=\(exit) \(first)"
-            }
-
             let controller = DeviceController()
             let probe = controller.probeHelperIdentity()
             let exitCode = controller.lastExitCode
@@ -260,29 +270,70 @@ class RootViewController: UIViewController {
             }
 
             let daemonLine = "daemon \(status.alive ? "在线" : "离线") \(status.detail)"
-            let dTail = DaemonManager.logTail(DaemonManager.daemonLogPath, lines: 4)
-            let iTail = DaemonManager.logTail(DaemonManager.installLogPath, lines: 4)
+            let hint = status.alive ? "" : "提示：daemon 离线 → 点上面「安装 root 守护进程」\n"
+            let dTail = DaemonManager.logTail(DaemonManager.daemonLogPath, lines: 3)
+            let iTail = DaemonManager.logTail(DaemonManager.installLogPath, lines: 3)
             let uTail = RootViewController.logTail()
+            let bTail = RootViewController.bootTail()
 
             let text = """
             构建 \(build)
             App uid=\(appUid) euid=\(appEuid)
             权限检查(可写 /var/mobile/Library/Preferences)=\(permission)
             \(daemonLine)
-            \(installLine)
-            身份探测 exit=\(exitCode) \(probe ? "ok" : "FAILED")
+            \(hint)身份探测 exit=\(exitCode) \(probe ? "ok" : "FAILED")
             --- install.log ---
             \(iTail)
             --- daemon.log ---
             \(dTail)
             --- URL 日志尾部 ---
             \(uTail)
+            --- 启动面包屑 ---
+            \(bTail)
             """
 
             DispatchQueue.main.async {
                 self.diagTextView.text = text
             }
         }
+    }
+
+    /// 手动安装 root 守护进程：只落盘、不调用 launchctl（见 DaemonManager.install 注释）。
+    @objc private func installDaemonTapped() {
+        guard !installingDaemon else { return }
+        installingDaemon = true
+        installDaemonButton.isEnabled = false
+        installDaemonButton.setTitle("安装中…", for: .normal)
+        DaemonManager.bootLog("install-daemon tapped")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let (spawned, exit, log) = DaemonManager.install(force: true, load: false)
+            let first = log.split(separator: "\n").first.map(String.init) ?? log
+            let result = "安装 spawn=\(spawned ? "ok" : "FAILED") exit=\(exit) \(first)"
+            DaemonManager.bootLog("install-daemon done: \(result)")
+
+            DispatchQueue.main.async {
+                self.installingDaemon = false
+                self.installDaemonButton.isEnabled = true
+                self.installDaemonButton.setTitle("安装 root 守护进程", for: .normal)
+                self.diagTextView.text = "\(result)\n\n正在重新探测…"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    self.refreshDiagnostics()
+                }
+            }
+        }
+    }
+
+    /// 读取 Documents/boot.log 的最后几行，看启动流程走到哪一步（闪退排查用）。
+    private static func bootTail() -> String {
+        let file = NSHomeDirectory() + "/Documents/boot.log"
+        guard let content = try? String(contentsOfFile: file, encoding: .utf8), !content.isEmpty else {
+            return "(无启动记录)"
+        }
+        return content.split(separator: "\n").suffix(5).map { line -> String in
+            let parts = line.split(separator: " ", maxSplits: 1)
+            return parts.count == 2 ? String(parts[1]) : String(line)
+        }.joined(separator: " → ")
     }
 
     /// 读取 Documents/reboottools-url.log 的最后几行，判断 URL 到底有没有送达。

@@ -17,6 +17,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var launchedByRebootURL = false
 
 	func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // 启动面包屑：v7 在真机上是「点开就闪退」，所以每一阶段先落一行日志，
+        // 只要 App 还能打开，面板里就能看到它走到哪一步死的。
+        DaemonManager.bootLog("didFinishLaunching", reset: true)
+
         // 必须在创建 RootViewController 之前设置标记，避免冷启动时先触发普通启动动作。
         if let url = launchOptions?[.url] as? URL, isRebootURL(url) {
             pendingRebootURL = url
@@ -25,12 +29,17 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
 		window = UIWindow(frame: UIScreen.main.bounds)
         mainViewController = RootViewController()
-        guard let mainVC = mainViewController else {
-            fatalError("Failed to initialize RootViewController")
+        // 不再用 fatalError：控制器初始化失败也要让 App 活着，把问题显示在面板里，
+        // 而不是留一个用户看不到任何信息的闪退。
+        let rootVC: UIViewController = mainViewController ?? UIViewController()
+        if mainViewController == nil {
+            DaemonManager.bootLog("RootViewController init FAILED")
         }
-        window!.rootViewController = UINavigationController(rootViewController: mainVC)
+        window!.rootViewController = UINavigationController(rootViewController: rootVC)
 		window!.makeKeyAndVisible()
+        DaemonManager.bootLog("window makeKeyAndVisible")
         settingsUtils.configQuickActions(application: application)
+        DaemonManager.bootLog("configQuickActions done")
         
         // 检查是否通过快捷方式启动
         if let shortcutItem = launchOptions?[.shortcutItem] as? UIApplicationShortcutItem {
@@ -96,7 +105,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     /// 打进二进制的构建标记，方便一眼确认手机装的是哪一版。
-    static let buildTag = "v7-daemon"
+    static let buildTag = "v8-noload"
 
     private func rebootURLAction(from url: URL) -> RebootURLAction? {
         guard url.scheme?.lowercased() == "reboottools" else { return nil }

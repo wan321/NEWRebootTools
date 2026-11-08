@@ -75,6 +75,11 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restric
 
 - (BOOL) installRootDaemon:(NSString *)daemonPath plistPath:(NSString *)plistPath
 {
+	return [self installRootDaemon:daemonPath plistPath:plistPath load:NO];
+}
+
+- (BOOL) installRootDaemon:(NSString *)daemonPath plistPath:(NSString *)plistPath load:(BOOL)load
+{
 	NSString *path = [[NSBundle mainBundle] pathForResource:@"RebootRootHelper" ofType:@""];
 	if (path == nil) {
 		_lastExitCode = -1;
@@ -84,7 +89,10 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restric
 
 	NSString *stdOut = nil;
 	NSString *stdErr = nil;
-	NSArray *args = @[@"install-daemon", daemonPath ?: @"", plistPath ?: @""];
+	NSMutableArray *args = [@[@"install-daemon", daemonPath ?: @"", plistPath ?: @""] mutableCopy];
+	if (load) {
+		[args addObject:@"--load"];
+	}
 	int result = spawnRoot(path, args, &stdOut, &stdErr);
 
 	_lastExitCode = result;
