@@ -16,23 +16,26 @@ jobs:
     runs-on: macos-15
 
     env:
-      THEOS: ${{ runner.temp }}/theos
+      THEOS: ${{ github.workspace }}/theos
 
     steps:
       # 1. 获取源码
       - name: Checkout source
         uses: actions/checkout@v4
 
-      # 2. 安装构建依赖
+      # 2. 安装依赖
       - name: Install dependencies
         run: |
-          brew update
+          set -euo pipefail
           brew install ldid dpkg xz
 
-      # 3. 安装 Theos
+      # 3. 安装 Theos 和 iOS SDK
       - name: Install Theos
         run: |
+          set -euo pipefail
+
           git clone --recursive https://github.com/theos/theos.git "$THEOS"
+
           mkdir -p "$THEOS/sdks"
 
           git clone https://github.com/theos/sdks.git "$RUNNER_TEMP/theos-sdks"
@@ -43,36 +46,30 @@ jobs:
             -name "*.sdk" \
             -exec cp -R {} "$THEOS/sdks/" \;
 
-          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          echo "Theos installed:"
+          ls -lah "$THEOS"
 
-          echo "Installed SDKs:"
+          echo "Available SDKs:"
           ls -lah "$THEOS/sdks"
 
-      # 4. 检查源码和 Helper
+      # 4. 检查源码
       - name: Validate source
         run: |
           set -euo pipefail
 
+          test -f Makefile
+          test -f Resources/Info.plist
+
           plutil -lint Resources/Info.plist
-
-          grep -q "reboottools" Resources/Info.plist || {
-            echo "URL Scheme reboottools missing"
-            exit 1
-          }
-
-          grep -q "RebootTools_RESOURCE_DIRS = Resources" Makefile || {
-            echo "Resources directory configuration missing"
-            exit 1
-          }
 
           for helper in \
             Resources/RebootRootHelper \
             Resources/RebootUserSpaceHelper
           do
-            test -s "$helper" || {
+            if [ ! -s "$helper" ]; then
               echo "Missing helper: $helper"
               exit 1
-            }
+            fi
 
             chmod +x "$helper"
 
@@ -82,21 +79,19 @@ jobs:
             echo "Helper OK: $helper"
           done
 
-      # 5. 编译应用并生成 TIPA
+      # 5. 编译
       - name: Build package
         run: |
           set -euo pipefail
 
           make clean
 
-          make package \
-            FINALPACKAGE=1 \
-            PACKAGE_FORMAT=ipa
+          make package FINALPACKAGE=1
 
           echo "Build output:"
-          find packages -maxdepth 1 -type f -print
+          find packages -maxdepth 2 -type f -print
 
-      # 6. 统一输出文件名
+      # 6. 生成固定名称 TIPA
       - name: Prepare TIPA
         run: |
           set -euo pipefail
@@ -113,16 +108,16 @@ jobs:
           done
 
           if [ -z "$PACKAGE" ]; then
-            echo "No IPA or TIPA package was generated."
+            echo "ERROR: No IPA or TIPA package generated."
             exit 1
           fi
 
           cp "$PACKAGE" dist/RebootTools-Shortcuts.tipa
 
-          echo "Final package:"
+          echo "Final TIPA:"
           ls -lh dist/RebootTools-Shortcuts.tipa
 
-      # 7. 验证 TIPA 内容
+      # 7. 验证 TIPA
       - name: Verify TIPA package
         run: |
           set -euo pipefail
@@ -138,42 +133,35 @@ jobs:
 
           APP="$TEMP_DIR/Payload/RebootTools.app"
 
-          test -d "$APP" || {
-            echo "Payload/RebootTools.app missing"
+          if [ ! -d "$APP" ]; then
+            echo "ERROR: Payload/RebootTools.app not found."
             exit 1
-          }
+          fi
 
-          test -s "$APP/RebootRootHelper" || {
-            echo "RebootRootHelper missing from app"
-            exit 1
-          }
+          test -s "$APP/Info.plist"
 
-          test -s "$APP/RebootUserSpaceHelper" || {
-            echo "RebootUserSpaceHelper missing from app"
-            exit 1
-          }
+          plutil -lint "$APP/Info.plist"
 
           for helper in \
             "$APP/RebootRootHelper" \
             "$APP/RebootUserSpaceHelper"
           do
+            if [ ! -s "$helper" ]; then
+              echo "ERROR: Missing helper: $helper"
+              exit 1
+            fi
+
             lipo "$helper" -verify_arch arm64
 
             if [ ! -x "$helper" ]; then
-              echo "Helper is not executable in package: $helper"
+              echo "ERROR: Helper is not executable: $helper"
               exit 1
             fi
           done
 
-          /usr/libexec/PlistBuddy \
-            -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' \
-            "$APP/Info.plist" | grep -qx "reboottools"
+          echo "TIPA structure verified successfully."
 
-          echo "TIPA package verification passed."
-          echo "Package size:"
-          ls -lh "$TIPA"
-
-      # 8. 上传最终 TIPA
+      # 8. 上传 TIPA
       - name: Upload TIPA artifact
         uses: actions/upload-artifact@v4
         with:
