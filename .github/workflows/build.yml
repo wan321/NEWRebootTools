@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     # Theos' documented setup action currently supports macOS runners.
-    runs-on: macos-14
+    runs-on: macos-13
     timeout-minutes: 30
     steps:
       - name: Checkout source
