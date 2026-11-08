@@ -122,12 +122,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
                 let success = action == .reboot
                     ? deviceController.rebootDevice()
                     : deviceController.rebootUserspace()
-                self.logDiagnostic("\(action.rawValue): helper \(success ? "spawn ok" : "spawn FAILED")")
+                let detail = "\(action.rawValue): helper \(success ? "spawn ok" : "spawn FAILED") exit=\(deviceController.lastExitCode) \(String(describing: deviceController.lastLog ?? ""))"
+                self.logDiagnostic(detail)
 
                 // 如果 Helper 启动失败，弹出提示（原实现是静默失败），并允许再次调用 URL 重试。
                 if !success {
                     self.rebootURLHandled = false
-                    self.showFailureAlert(action: action)
+                    self.showFailureAlert(action: action, detail: detail)
                 }
             }
         }
@@ -135,10 +136,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     /// 失败时给出可见反馈：helper 起不来时（常见于缺少 platform-application 或 reboot 权限）
     /// 原来只在 NSLog 里留一行，侧载环境看不到，表现为“点了什么都没发生”。
-    private func showFailureAlert(action: RebootURLAction) {
-        let message = "「\(action.displayName)」未能执行：无法启动 Helper（可能缺少相应权限）。"
+    private func showFailureAlert(action: RebootURLAction, detail: String) {
+        let message = "「\(action.displayName)」未能执行。\n\n\(detail)"
         let alert = UIAlertController(title: "RebootTools", message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "好", style: .default))
+        alert.addAction(UIAlertAction(title: "复制详情", style: .default) { _ in
+            UIPasteboard.general.string = detail
+        })
         DispatchQueue.main.async {
             let presenter = self.window?.rootViewController?.presentedViewController
                 ?? self.window?.rootViewController

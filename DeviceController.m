@@ -5,6 +5,13 @@
 #import <FrontBoardServices/FBSSystemService.h>
 
 @implementation DeviceController
+{
+	int _lastExitCode;
+	NSString *_lastLog;
+}
+
+@synthesize lastExitCode = _lastExitCode;
+@synthesize lastLog = _lastLog;
 
 #define POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE 1
 extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t* __restrict, uid_t, uint32_t);
@@ -20,15 +27,21 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restric
     NSString *stdErr = nil;
 
 	if (path == nil) {
+		_lastExitCode = -1;
+		_lastLog = @"RebootRootHelper not found in bundle";
 		return NO;
 	}
 
 	int result = spawnRoot(path, args, &stdOut, &stdErr);
-	if (result == 0) {
-		return YES;
-	}
+	// 必须把 helper 的退出码和 stderr 带出去：reboot(0) 被内核拒绝时
+	// 只有这里才能看到真实原因（EPERM 等），否则表现为静默失败。
+	_lastExitCode = result;
+	_lastLog = [NSString stringWithFormat:@"exit=%d stdout=%@ stderr=%@",
+				result,
+				stdOut.length ? stdOut : @"(empty)",
+				stdErr.length ? stdErr : @"(empty)"];
 
-	return NO;
+	return result == 0;
 }
 
 - (BOOL) RebootUserspace
@@ -40,10 +53,18 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restric
     NSString *stdErr = nil;
 
     if (path == nil) {
+        _lastExitCode = -1;
+        _lastLog = @"RebootUserSpaceHelper not found in bundle";
         return NO;
     }
 
     int result = spawnRoot(path, args, &stdOut, &stdErr);
+    _lastExitCode = result;
+    _lastLog = [NSString stringWithFormat:@"exit=%d stdout=%@ stderr=%@",
+                result,
+                stdOut.length ? stdOut : @"(empty)",
+                stdErr.length ? stdErr : @"(empty)"];
+
     if (result == 0) {
         return YES;
     }

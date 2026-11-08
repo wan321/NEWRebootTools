@@ -126,6 +126,17 @@ jobs:
 
           file Resources/RebootRootHelper
 
+          # 打印并断言真正进包的 entitlements。helper 若缺 no-sandbox，
+          # reboot(0) 会被沙箱拒绝；配合 helper 现在返回 errno，失败才可见。
+          echo "========== HELPER ENTITLEMENTS =========="
+          ldid -e Resources/RebootRootHelper
+          for key in 'platform-application' 'com.apple.private.security.no-sandbox'; do
+            if ! ldid -e Resources/RebootRootHelper | grep -q "$key"; then
+              echo "ERROR: RebootRootHelper entitlements missing $key"
+              exit 1
+            fi
+          done
+
       # 6. 编译主程序并生成 IPA
       - name: Build main application
         shell: bash
@@ -225,6 +236,12 @@ jobs:
           if [ -f "$APP/RebootRootHelper" ]; then
             file "$APP/RebootRootHelper"
             otool -hv "$APP/RebootRootHelper"
+            echo "========== PACKAGED HELPER ENTITLEMENTS =========="
+            ldid -e "$APP/RebootRootHelper"
+            if ! ldid -e "$APP/RebootRootHelper" | grep -q 'com.apple.private.security.no-sandbox'; then
+              echo "ERROR: packaged RebootRootHelper lost no-sandbox entitlement."
+              exit 1
+            fi
             if otool -hv "$APP/RebootRootHelper" | grep -qiE 'DSYM|OBJECT'; then
               echo "ERROR: bundled RebootRootHelper is a debug-symbol file, not an executable."
               exit 1
