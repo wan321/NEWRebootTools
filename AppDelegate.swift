@@ -1,5 +1,12 @@
 import UIKit
 
+/// v13：把 Swift 字符串安全地送进 C 级追踪器。
+/// RTTrace 是纯 C 的 write+fsync（启动时已预打开 fd），所以就算下一步崩在
+/// ObjC 运行时里，这一行也已经落在磁盘上了。
+func RTTraceLine(_ text: String) {
+    text.withCString { RTTrace("%s", $0) }
+}
+
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
 
@@ -17,9 +24,14 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var launchedByRebootURL = false
 
 	func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // v13：这里必须是第一件事——纯 C 把 fd 打开，之后每一步都有痕迹。
+        RTTraceInit()
+        RTTraceLine("didFinishLaunching enter")
+        RTTraceLine("buildTag=\(AppDelegate.buildTag)")
         // 启动面包屑：v7 在真机上是「点开就闪退」，所以每一阶段先落一行日志，
         // 只要 App 还能打开，面板里就能看到它走到哪一步死的。
         DaemonManager.bootLog("didFinishLaunching", reset: true)
+        RTTraceLine("bootLog didFinishLaunching done")
 
         // 必须在创建 RootViewController 之前设置标记，避免冷启动时先触发普通启动动作。
         if let url = launchOptions?[.url] as? URL, isRebootURL(url) {
@@ -37,8 +49,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         }
         window!.rootViewController = UINavigationController(rootViewController: rootVC)
 		window!.makeKeyAndVisible()
+        RTTraceLine("window makeKeyAndVisible")
         DaemonManager.bootLog("window makeKeyAndVisible")
         settingsUtils.configQuickActions(application: application)
+        RTTraceLine("configQuickActions done")
         DaemonManager.bootLog("configQuickActions done")
         
         // 检查是否通过快捷方式启动
@@ -105,7 +119,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     /// 打进二进制的构建标记，方便一眼确认手机装的是哪一版。
-    static let buildTag = "v12-probe"
+    static let buildTag = "v13-trace"
 
     private func rebootURLAction(from url: URL) -> RebootURLAction? {
         guard url.scheme?.lowercased() == "reboottools" else { return nil }

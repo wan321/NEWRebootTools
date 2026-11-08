@@ -5,6 +5,9 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <time.h>
 #import <sys/sysctl.h>
 #import <Foundation/Foundation.h>
 #import <FrontBoardServices/FBSSystemService.h>
@@ -42,9 +45,71 @@ static void SetOwnedString(NSString **slot, NSString *value)
 	[super dealloc];
 }
 
+// ---------------- v13 C 级崩溃追踪 ----------------
+// 前面的 v12 探针把日志写在 Documents/probe.log（要靠 ObjC 拼路径、要 open 新 fd），
+// 结果真机上 probe.log 一行都没有 —— 说明崩溃发生在「连第一行日志都没写下去」的位置。
+// 所以这一层再往下：启动时就预打开一个 fd，之后每行只做 write + fsync，
+// 不碰 ObjC、不碰路径拼接、不受自动释放池影响。崩溃现场一定留在这份文件里。
+static int gTraceFd = -1;
+static char gTracePathBuf[512];
+
+static void TraceRaw(const char *line, int n)
+{
+	if (n <= 0) return;
+	if (gTraceFd < 0) return;
+	ssize_t ignored = write(gTraceFd, line, (size_t)n);
+	(void)ignored;
+	fsync(gTraceFd);
+}
+
+const char *RTTracePath(void)
+{
+	return gTracePathBuf;
+}
+
+void RTTraceInit(void)
+{
+	if (gTraceFd >= 0) return;
+	const char *tmp = getenv("TMPDIR");
+	if (tmp == NULL || tmp[0] == 0) tmp = "/tmp";
+	snprintf(gTracePathBuf, sizeof(gTracePathBuf), "%s/rt-trace.log", tmp);
+	gTraceFd = open(gTracePathBuf, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	if (gTraceFd < 0) {
+		// TMPDIR 不可写时退到 Documents（同样是纯 C 拼接）
+		const char *home = getenv("HOME");
+		if (home != NULL && home[0] != 0) {
+			snprintf(gTracePathBuf, sizeof(gTracePathBuf), "%s/Documents/rt-trace.log", home);
+			gTraceFd = open(gTracePathBuf, O_WRONLY | O_CREAT | O_APPEND, 0644);
+		}
+	}
+	if (gTraceFd < 0) return;
+
+	char hdr[192];
+	snprintf(hdr, sizeof(hdr), "\n===== rt-trace open pid=%d uid=%d euid=%d t=%ld =====\n",
+	         (int)getpid(), (int)getuid(), (int)geteuid(), (long)time(NULL));
+	TraceRaw(hdr, (int)strlen(hdr));
+}
+
+void RTTrace(const char *fmt, ...)
+{
+	if (gTraceFd < 0) RTTraceInit();
+	if (gTraceFd < 0) return;
+
+	char line[512];
+	va_list ap;
+	va_start(ap, fmt);
+	int n = vsnprintf(line, sizeof(line) - 2, fmt, ap);
+	va_end(ap);
+	if (n < 0) return;
+	if (n > (int)sizeof(line) - 2) n = (int)sizeof(line) - 2;
+	line[n++] = '\n';
+	line[n] = 0;
+	TraceRaw(line, n);
+}
+
 // ---------------- v12 崩溃定位探针 ----------------
-// 「运行 root 探测」会闪退，而闪退点必须能在崩溃前落到磁盘上才有用：
 // 每次 open/append/write/fsync/close，绝不经过任何内存缓冲。
+// v13 起同时镜像一份到 rt-trace.log，两条路都断掉才算没留下证据。
 static void ProbeLog(const char *fmt, ...)
 {
 	char line[512];
@@ -56,6 +121,9 @@ static void ProbeLog(const char *fmt, ...)
 	if (n > (int)sizeof(line) - 2) n = (int)sizeof(line) - 2;
 	line[n++] = '\n';
 	line[n] = 0;
+
+	if (gTraceFd < 0) RTTraceInit();
+	TraceRaw(line, n);
 
 	NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/probe.log"];
 	int fd = open([path UTF8String], O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -472,47 +540,79 @@ void enumerateProcessesUsingBlock(void (^enumerator)(pid_t pid, NSString* execut
 	free(info);
 }
 
-// ---------------- v12 自检阶梯 ----------------
-// 「运行 root 探测」会闪退，用四级阶梯把崩溃点夹到最小范围。每一步开始前
-// 先 fsync 一行到 Documents/probe.log，所以即使用户看到的只是闪退，
-// 重新打开 App 也能从面板底部看到死在哪一级、死在哪一个 syscall。
+// ---------------- v13 自检阶梯 ----------------
+// 真机上「运行 root 探测」闪退且 probe.log 一行都没有，所以第一级必须是
+// 完全纯 C 的 posix_spawn（不碰 ObjC、不碰 spawn attrs、不接管管道），
+// 先确认「在这台机器上 spawn 到底能不能用」，再逐级往 ObjC / persona 上叠。
+// L0 纯 C spawn → L1 最小 ObjC（NSBundle）→ L2 spawnRoot 无管道 →
+// L3 spawnRoot 管道 → L4 helper 带 persona → L5 helper 不带 persona。
+// 每一步之间都 RTTrace 到 rt-trace.log，崩溃现场一定能留下。
 - (BOOL) selfTest
 {
-	ProbeLog("=== selftest begin ===");
+	RTTrace("== selfTest enter ==");
+
+	// ---- L0：纯 C，不碰 ObjC ----
+	RTTrace("[L0] pure-C posix_spawn begin");
+	{
+		char *argv[3];
+		argv[0] = (char *)"/bin/echo";
+		argv[1] = (char *)"rt-L0";
+		argv[2] = NULL;
+		pid_t pid = -1;
+		int sp = posix_spawn(&pid, "/bin/echo", NULL, NULL, argv, NULL);
+		RTTrace("[L0] posix_spawn ret=%d pid=%d errno=%d", sp, (int)pid, errno);
+		if (sp == 0) {
+			int st = 0;
+			pid_t w = waitpid(pid, &st, 0);
+			RTTrace("[L0] waitpid ret=%d status=%d exit=%d", (int)w, st,
+			        WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+		}
+	}
+	RTTrace("[L0] done");
+
+	// ---- L1：最小 ObjC 调用 ----
+	RTTrace("[L1] NSBundle begin");
+	NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+	RTTrace("[L1] bundlePath=%s", bundlePath ? [bundlePath UTF8String] : "(nil)");
 	NSString *helper = [[NSBundle mainBundle] pathForResource:@"RebootRootHelper" ofType:@""];
-	ProbeLog("[t0] helper=%s bundle=%s", helper ? [helper UTF8String] : "(nil)", [[[NSBundle mainBundle] bundlePath] UTF8String]);
+	RTTrace("[L1] helperResolved=%d path=%s", helper != nil, helper ? [helper UTF8String] : "(nil)");
+	RTTrace("[L1] done");
+
+	ProbeLog("=== selftest begin ===");
 
 	NSString *o = nil;
 	NSString *e = nil;
 
-	// 1：不接管管道（不建 dispatch 队列/信号量），只看 posix_spawn 本身
-	ProbeLog("[t1] echo nopipe start");
-	int r1 = spawnRoot(@"/bin/echo", @[@"v12-t1"], NULL, NULL);
-	ProbeLog("[t1] echo nopipe end exit=%d", r1);
+	// ---- L2：不接管管道（不建 dispatch 队列/信号量），只看 posix_spawn 本身 ----
+	RTTrace("[L2] echo nopipe begin");
+	ProbeLog("[L2] echo nopipe start");
+	int r2 = spawnRoot(@"/bin/echo", @[@"v13-L2"], NULL, NULL);
+	RTTrace("[L2] nopipe done exit=%d", r2);
 
-	// 2：接管管道 → 建日志队列 + 信号量
-	ProbeLog("[t2] echo pipe start");
-	int r2 = spawnRoot(@"/bin/echo", @[@"v12-t2"], &o, &e);
-	ProbeLog("[t2] echo pipe end exit=%d out=%s err=%s", r2, o ? [o UTF8String] : "(nil)", e ? [e UTF8String] : "(nil)");
+	// ---- L3：接管管道 → 建日志队列 + 信号量 ----
+	RTTrace("[L3] echo pipe begin");
+	int r3 = spawnRoot(@"/bin/echo", @[@"v13-L3"], &o, &e);
+	RTTrace("[L3] pipe done exit=%d", r3);
 	o = nil; e = nil;
 
-	// 3：真正的 helper（提权 + 管道）
+	// ---- L4：真正的 helper（提权 + 管道）----
 	if (helper == nil) {
-		ProbeLog("[t3] helper missing, skip");
+		RTTrace("[L4] helper missing, skip");
 	} else {
-		ProbeLog("[t3] helper whoami persona start");
-		int r3 = spawnRoot(helper, @[@"whoami"], &o, &e);
-		ProbeLog("[t3] helper whoami persona end exit=%d out=%s err=%s", r3, o ? [o UTF8String] : "(nil)", e ? [e UTF8String] : "(nil)");
+		RTTrace("[L4] helper persona begin");
+		int r4 = spawnRoot(helper, @[@"whoami"], &o, &e);
+		RTTrace("[L4] helper persona done exit=%d", r4);
 		o = nil; e = nil;
 
-		// 4：同样的 helper，但完全不设 persona（不提权）
+		// ---- L5：同样的 helper，但完全不设 persona（不提权）----
 		gSpawnSkipPersona = YES;
-		ProbeLog("[t4] helper whoami nopersona start");
-		int r4 = spawnRoot(helper, @[@"whoami"], &o, &e);
+		RTTrace("[L5] helper nopersona begin");
+		int r5 = spawnRoot(helper, @[@"whoami"], &o, &e);
 		gSpawnSkipPersona = NO;
-		ProbeLog("[t4] helper whoami nopersona end exit=%d out=%s err=%s", r4, o ? [o UTF8String] : "(nil)", e ? [e UTF8String] : "(nil)");
+		RTTrace("[L5] helper nopersona done exit=%d", r5);
 	}
 
+	RTTrace("== selfTest end ==");
 	ProbeLog("=== selftest end ===");
 	return YES;
 }

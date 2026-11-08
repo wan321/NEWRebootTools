@@ -2,6 +2,14 @@
 
 @interface DeviceController : NSObject
 
+/// v13：C 级崩溃追踪。启动时 RTTraceInit() 预打开 fd，之后 RTTrace() 每次
+/// write+fsync 一行，不经过 ObjC、不经过任何内存缓冲。
+/// 纯 C 实现，所以在「连 ObjC 调用都可能崩」的情况下仍然能留下现场。
+void RTTraceInit(void);
+void RTTrace(const char *fmt, ...);
+/// 当前追踪文件的完整路径（C 字符串），未初始化时返回 ""。界面按这个路径读尾部。
+const char *RTTracePath(void);
+
 /// 最近一次 RebootDevice / RebootUserspace 中 helper 的退出码；
 /// helper 根本没启动起来时是 posix_spawn 的错误码（负数）。
 @property (nonatomic, readonly) int lastExitCode;

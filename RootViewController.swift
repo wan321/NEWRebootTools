@@ -257,6 +257,7 @@ class RootViewController: UIViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        RTTraceLine("viewDidAppear")
         DaemonManager.bootLog("viewDidAppear")
         // v11：启动阶段**不做任何 spawn / 不做后台探测**。
         // v6..v10 的「点开就闪退」就发生在启动自动探测的后台任务里
@@ -289,6 +290,8 @@ class RootViewController: UIViewController {
         }
         // 自检记录放在最前面：面板放不下时用户不用滚动就能看到崩溃现场。
         text += """
+        --- rt-trace 尾部 ---
+        \(RootViewController.rtTraceTail())
         --- probe.log 尾部 ---
         \(RootViewController.probeTail())
         --- install.log ---
@@ -301,6 +304,17 @@ class RootViewController: UIViewController {
         \(RootViewController.bootTail())
         """
         diagTextView.text = text
+    }
+
+    /// 读 C 级追踪文件（/tmp/rt-trace.log）尾部：v12 的 probe.log 一行都没写下来，
+    /// 说明崩溃发生在「连第一条 ObjC 日志都来不及写」的位置，所以这一版看这里。
+    private static func rtTraceTail() -> String {
+        let path = String(cString: RTTracePath())
+        guard !path.isEmpty else { return "(追踪器未初始化)" }
+        guard let content = try? String(contentsOfFile: path, encoding: .utf8), !content.isEmpty else {
+            return "(无追踪记录 path=\(path))"
+        }
+        return content.split(separator: "\n").suffix(14).joined(separator: "\n")
     }
 
     /// 读 Documents/probe.log 尾部：v12 自检阶梯的最后几行，
@@ -316,17 +330,25 @@ class RootViewController: UIViewController {
     /// 显式触发的身份探测（不改动设备）。崩溃排查用：进入前后都写启动面包屑，
     /// 若这一下闪退，下次打开 App 的面包屑里会留下 probe-start。
     @objc private func probeTapped() {
+        // v13：这一行必须是函数体第一句。如果连它都没出现在 rt-trace.log 里，
+        // 说明崩溃发生在按钮回调之前（不是我们的代码）。
+        RTTraceLine("probeTapped enter")
         guard !probing else { return }
         probing = true
         probeButton.isEnabled = false
         probeButton.setTitle("探测中…", for: .normal)
+        RTTraceLine("probeTapped ui updated")
         DaemonManager.bootLog("probe-start")
+        RTTraceLine("probeTapped bootLog written")
 
         DispatchQueue.global(qos: .userInitiated).async {
+            RTTraceLine("bg closure entered")
             let controller = DeviceController()
-            // v12：跑四级自检阶梯（echo 无管道 / echo 有管道 / helper 带 persona /
-            // helper 不带 persona），每一步都先 fsync 到 Documents/probe.log。
+            RTTraceLine("DeviceController created")
+            // v13：跑自检阶梯（先纯 C spawn，再逐级叠加 ObjC / 管道 / persona），
+            // 每一步都先落到 rt-trace.log 与 Documents/probe.log。
             let ok = controller.selfTest()
+            RTTraceLine("selfTest returned")
             let exit = controller.lastExitCode
             DaemonManager.bootLog("probe-done")
             let result = "selftest=\(ok ? "ok" : "FAILED") lastExit=\(exit)"
@@ -342,6 +364,7 @@ class RootViewController: UIViewController {
 
     /// 手动安装 root 守护进程：只落盘、不调用 launchctl（见 DaemonManager.install 注释）。
     @objc private func installDaemonTapped() {
+        RTTraceLine("installDaemonTapped enter")
         guard !installingDaemon else { return }
         installingDaemon = true
         installDaemonButton.isEnabled = false
@@ -349,7 +372,9 @@ class RootViewController: UIViewController {
         DaemonManager.bootLog("install-daemon tapped")
 
         DispatchQueue.global(qos: .userInitiated).async {
+            RTTraceLine("install bg closure entered")
             let (spawned, exit, log) = DaemonManager.install(force: true, load: false)
+            RTTraceLine("install returned spawn=\(spawned) exit=\(exit)")
             let first = log.split(separator: "\n").first.map(String.init) ?? log
             let result = "安装 spawn=\(spawned ? "ok" : "FAILED") exit=\(exit) \(first)"
             DaemonManager.bootLog("install-daemon done: \(result)")
