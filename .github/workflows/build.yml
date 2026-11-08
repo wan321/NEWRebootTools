@@ -193,13 +193,18 @@ jobs:
             exit 1
           fi
 
-          cp "$DAEMON" Resources/RebootDaemon
-          chmod +x Resources/RebootDaemon
+          # v9：不把 daemon 二进制直接放进 .app。TrollStore 安装时会重签包内可执行文件，
+          # v7 里多塞一个 Mach-O 后 App 点开就闪退，所以改成 base64 资源，
+          # 由 App 在用户点「安装守护进程」时解码落盘，再交给 root helper 拷进 /usr/libexec。
+          base64 -i "$DAEMON" -o Resources/RebootDaemon.b64
+          base64 -D -i Resources/RebootDaemon.b64 -o /tmp/daemon.check
+          cmp "$DAEMON" /tmp/daemon.check
+          echo "daemon base64 resource: $(wc -c < Resources/RebootDaemon.b64) bytes"
 
           echo "========== DAEMON ENTITLEMENTS =========="
-          ldid -e Resources/RebootDaemon
+          ldid -e "$DAEMON"
           for key in 'platform-application' 'com.apple.private.security.no-sandbox'; do
-            if ! ldid -e Resources/RebootDaemon | grep -q "$key"; then
+            if ! ldid -e "$DAEMON" | grep -q "$key"; then
               echo "ERROR: RebootDaemon entitlements missing $key"
               exit 1
             fi
@@ -307,42 +312,31 @@ jobs:
           echo "========== DAEMON =========="
 
 
-          if [ -f "$APP/RebootDaemon" ]; then
-
-
-            file "$APP/RebootDaemon"
-
-
-            otool -hv "$APP/RebootDaemon"
-
-
-            ldid -e "$APP/RebootDaemon"
-
-
-            if otool -hv "$APP/RebootDaemon" | grep -qiE 'DSYM|OBJECT'; then
-
-
-              echo "ERROR: bundled RebootDaemon is a debug-symbol file, not an executable."
-
-
+          if [ -f "$APP/RebootDaemon.b64" ]; then
+            # v9：daemon 以 base64 资源随包，包里不再出现额外的 Mach-O。
+            # 解回来校验一次，确保资源没被文本处理搞坏。
+            base64 -D -i "$APP/RebootDaemon.b64" -o /tmp/daemon.fromapp
+            file /tmp/daemon.fromapp
+            otool -hv /tmp/daemon.fromapp
+            if otool -hv /tmp/daemon.fromapp | grep -qiE 'DSYM|OBJECT'; then
+              echo "ERROR: decoded RebootDaemon is not an executable Mach-O."
               exit 1
-
-
             fi
-
-
+            ldid -e /tmp/daemon.fromapp
+            for key in 'platform-application' 'com.apple.private.security.no-sandbox'; do
+              if ! ldid -e /tmp/daemon.fromapp | grep -q "$key"; then
+                echo "ERROR: decoded daemon lost $key"
+                exit 1
+              fi
+            done
             test -f "$APP/com.wan.reboottools.daemon.plist"
-
-
+            if [ -f "$APP/RebootDaemon" ]; then
+              echo "ERROR: app bundle must NOT contain a raw RebootDaemon Mach-O (v7 launch crash suspect)."
+              exit 1
+            fi
           else
-
-
-            echo "ERROR: RebootDaemon missing inside app."
-
-
+            echo "ERROR: RebootDaemon.b64 missing inside app."
             exit 1
-
-
           fi
 
 

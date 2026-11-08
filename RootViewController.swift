@@ -270,6 +270,7 @@ class RootViewController: UIViewController {
             }
 
             let daemonLine = "daemon \(status.alive ? "在线" : "离线") \(status.detail)"
+            let hasB64 = Bundle.main.path(forResource: "RebootDaemon", ofType: "b64") != nil
             let hint = status.alive ? "" : "提示：daemon 离线 → 点上面「安装 root 守护进程」\n"
             let dTail = DaemonManager.logTail(DaemonManager.daemonLogPath, lines: 3)
             let iTail = DaemonManager.logTail(DaemonManager.installLogPath, lines: 3)
@@ -280,7 +281,7 @@ class RootViewController: UIViewController {
             构建 \(build)
             App uid=\(appUid) euid=\(appEuid)
             权限检查(可写 /var/mobile/Library/Preferences)=\(permission)
-            \(daemonLine)
+            \(daemonLine)  资源 RebootDaemon.b64=\(hasB64 ? "在" : "缺失")
             \(hint)身份探测 exit=\(exitCode) \(probe ? "ok" : "FAILED")
             --- install.log ---
             \(iTail)

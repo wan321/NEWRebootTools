@@ -46,6 +46,34 @@ final class DaemonManager: NSObject {
         return Status(alive: alive, detail: "uid=\(uid) age=\(Int(age))s")
     }
 
+    /// 把随包的 base64 资源还原成可执行文件，落到 mobile 可写的缓存目录。
+    /// v9：App 包里不再出现裸的 daemon Mach-O——TrollStore 安装时要重签包内可执行文件，
+    /// v7 多塞一个后点开就闪退，所以改为安装时解码。
+    static func stageDaemonBinary() -> (path: String?, message: String) {
+        let bundle = Bundle.main
+        guard let b64 = bundle.path(forResource: "RebootDaemon", ofType: "b64"),
+              let text = try? String(contentsOfFile: b64, encoding: .utf8) else {
+            return (nil, "包内缺少 RebootDaemon.b64")
+        }
+        let cleaned = text.components(separatedBy: .whitespacesAndNewlines).joined()
+        guard let data = Data(base64Encoded: cleaned), !data.isEmpty else {
+            return (nil, "base64 解码失败（数据为空或格式错）")
+        }
+        do {
+            try FileManager.default.createDirectory(atPath: baseDir, withIntermediateDirectories: true)
+        } catch {
+            return (nil, "建目录失败: \(error.localizedDescription)")
+        }
+        let stagePath = baseDir + "/RebootDaemon.staged"
+        do {
+            try data.write(to: URL(fileURLWithPath: stagePath), options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stagePath)
+        } catch {
+            return (nil, "写临时文件失败: \(error.localizedDescription)")
+        }
+        return (stagePath, "解码 \(data.count) 字节")
+    }
+
     /// 尝试用 root helper 安装/更新 daemon。返回 (spawn 是否成功, exit, 日志)。
     /// v8：默认只落盘、不调用 launchctl（load = false），因为「App 启动即 spawn 一个
     /// 以 root 跑的 launchctl」是 v7 点开就闪退的头号嫌疑。activate 交给下次开机。
@@ -56,14 +84,18 @@ final class DaemonManager: NSObject {
         installAttempted = true
 
         let bundle = Bundle.main
-        guard let daemon = bundle.path(forResource: "RebootDaemon", ofType: nil),
-              let plist = bundle.path(forResource: "com.wan.reboottools.daemon", ofType: "plist") else {
-            return (false, -1, "包内缺少 RebootDaemon 或 launchd plist")
+        let (staged, stageMsg) = stageDaemonBinary()
+        guard let daemonPath = staged else {
+            return (false, -1, stageMsg)
+        }
+        guard let plist = bundle.path(forResource: "com.wan.reboottools.daemon", ofType: "plist") else {
+            return (false, -1, "包内缺少 launchd plist")
         }
 
         let controller = DeviceController()
-        let ok = controller.installRootDaemon(daemon, plistPath: plist, load: load)
-        return (ok, Int(controller.lastExitCode), controller.lastLog ?? "")
+        let ok = controller.installRootDaemon(daemonPath, plistPath: plist, load: load)
+        let log = "\(stageMsg) | \(controller.lastLog ?? "")"
+        return (ok, Int(controller.lastExitCode), log)
     }
 
     /// 启动阶段面包屑：v7 在真机上点开就闪退，而闪退前的最后一行只能靠这个留下痕迹。
