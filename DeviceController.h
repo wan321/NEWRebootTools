@@ -14,6 +14,11 @@ void RTTrace(const char *fmt, ...);
 void RTTraceStr(const char *line);
 /// 当前追踪文件的完整路径（C 字符串），未初始化时返回 ""。界面按这个路径读尾部。
 const char *RTTracePath(void);
+/// v14：从 Swift 完全绕开 ObjC 的入口。v13 的 rt-trace 停在 `bg closure entered`
+/// 之后一行都没有，说明崩在 Swift 侧「创建 DeviceController / 调用其方法」这一段。
+/// 这个函数是纯 C 入口：Swift 只说一句 RTDoSelfTest()，里面的 alloc/init/selfTest
+/// 全在 ObjC 里发生，每步都打点。返回值 0 表示跑完没崩。
+int RTDoSelfTest(void);
 
 /// 最近一次 RebootDevice / RebootUserspace 中 helper 的退出码；
 /// helper 根本没启动起来时是 posix_spawn 的错误码（负数）。

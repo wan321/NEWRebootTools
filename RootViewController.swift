@@ -343,15 +343,13 @@ class RootViewController: UIViewController {
 
         DispatchQueue.global(qos: .userInitiated).async {
             RTTraceLine("bg closure entered")
-            let controller = DeviceController()
-            RTTraceLine("DeviceController created")
-            // v13：跑自检阶梯（先纯 C spawn，再逐级叠加 ObjC / 管道 / persona），
-            // 每一步都先落到 rt-trace.log 与 Documents/probe.log。
-            let ok = controller.selfTest()
-            RTTraceLine("selfTest returned")
-            let exit = controller.lastExitCode
+            // v14：Swift 侧不碰 ObjC 对象，只调一个纯 C 入口。
+            // v13 证明崩溃卡在「创建 DeviceController / 调它的方法」这段，
+            // 所以 alloc/init/selfTest 全部收进 C 函数里，界面上只拿回一个返回码。
+            let rc = RTDoSelfTest()
+            RTTraceLine("RTDoSelfTest returned rc=\(rc)")
+            let result = "C 入口自检 rc=\(rc)（明细见 rt-trace 尾部）"
             DaemonManager.bootLog("probe-done")
-            let result = "selftest=\(ok ? "ok" : "FAILED") lastExit=\(exit)"
 
             DispatchQueue.main.async {
                 self.probing = false

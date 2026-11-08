@@ -634,4 +634,80 @@ void enumerateProcessesUsingBlock(void (^enumerator)(pid_t pid, NSString* execut
 	return YES;
 }
 
+// ---------------- v14 纯 C spawn 探测 + C 入口自检 ----------------
+// v13 的 rt-trace 停在 `bg closure entered` 之后一行都没有 —— 说明崩在
+// 「Swift 侧创建 DeviceController / 调用它的方法」这一段，而不是 spawn 内部。
+// 所以在碰任何 ObjC 对象之前，先用纯 C 验证 posix_spawn 是否能在这台机器上用；
+// 再把 alloc/init/selfTest 全部收进 C 函数，Swift 侧只说一句话。
+static void RTSpawnTestC(void)
+{
+	RTTrace("CSPAWN begin");
+	char *argv[3];
+	argv[0] = (char *)"/bin/echo";
+	argv[1] = (char *)"cspawn";
+	argv[2] = NULL;
+	pid_t pid = -1;
+	int sp = posix_spawn(&pid, "/bin/echo", NULL, NULL, argv, NULL);
+	RTTrace("CSPAWN posix_spawn ret=%d pid=%d", sp, (int)pid);
+	if (sp == 0) {
+		int st = 0;
+		waitpid(pid, &st, 0);
+		RTTrace("CSPAWN waitpid exit=%d", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+	}
+
+	RTTrace("CSPAWN pipe begin");
+	int fds[2] = { -1, -1 };
+	if (pipe(fds) != 0) {
+		RTTrace("CSPAWN pipe() FAILED");
+		return;
+	}
+	posix_spawn_file_actions_t fa;
+	int faInit = posix_spawn_file_actions_init(&fa);
+	posix_spawn_file_actions_adddup2(&fa, fds[1], STDOUT_FILENO);
+	posix_spawn_file_actions_addclose(&fa, fds[0]);
+
+	pid_t pid2 = -1;
+	char *argv2[3];
+	argv2[0] = (char *)"/bin/echo";
+	argv2[1] = (char *)"cspawn-pipe";
+	argv2[2] = NULL;
+	int sp2 = posix_spawn(&pid2, "/bin/echo", &fa, NULL, argv2, NULL);
+	posix_spawn_file_actions_destroy(&fa);
+	close(fds[1]);
+	RTTrace("CSPAWN pipe spawn ret=%d pid=%d faInit=%d", sp2, (int)pid2, faInit);
+
+	char buf[256];
+	memset(buf, 0, sizeof(buf));
+	ssize_t got = read(fds[0], buf, sizeof(buf) - 1);
+	RTTrace("CSPAWN pipe read=%d text=%s", (int)got, got > 0 ? buf : "(empty)");
+	close(fds[0]);
+	if (sp2 == 0) {
+		int st2 = 0;
+		waitpid(pid2, &st2, 0);
+		RTTrace("CSPAWN pipe exit=%d", WIFEXITED(st2) ? WEXITSTATUS(st2) : -1);
+	}
+	RTTrace("CSPAWN end");
+}
+
+int RTDoSelfTest(void)
+{
+	RTTrace("RT enter");
+	RTSpawnTestC();
+	RTTrace("RT after pure-C spawn test");
+
+	DeviceController *c = [DeviceController alloc];
+	RTTrace("RT alloc ok ptr=%p", (void *)c);
+	if (c == nil) {
+		RTTrace("RT alloc returned nil");
+		return -1;
+	}
+	c = [c init];
+	RTTrace("RT init ok");
+	[c selfTest];
+	RTTrace("RT selfTest returned exit=%d", [c lastExitCode]);
+	[c release];
+	RTTrace("RT released");
+	return 0;
+}
+
 @end
