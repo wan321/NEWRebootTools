@@ -96,7 +96,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     /// 打进二进制的构建标记，方便一眼确认手机装的是哪一版。
-    static let buildTag = "v6-diag"
+    static let buildTag = "v7-daemon"
 
     private func rebootURLAction(from url: URL) -> RebootURLAction? {
         guard url.scheme?.lowercased() == "reboottools" else { return nil }
@@ -137,19 +137,45 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
         switch action {
         case .respring:
-            // 注销不经过 Helper；只有一个 SpringBoard 都没杀掉时才会返回。
+            // 优先交给 root daemon：只有 uid 0 才能真的把 SpringBoard 杀掉。
+            let daemon = DaemonManager.status()
+            if daemon.alive, DaemonManager.send("respring") {
+                detail = "respring: 已投递给 root daemon（\(daemon.detail)），若无效见 daemon 日志"
+                break
+            }
+            // daemon 不在时退回 App 内 kill（mobile 下大概率 EPERM，但会如实报告）。
             _ = deviceController.respringAndReport()
             detail = "\(action.rawValue): \(String(describing: deviceController.lastLog ?? ""))"
         case .whoami:
             // 已在上面单独处理，这里只为穷尽 switch。
             detail = "whoami"
         case .reboot, .userspace:
+            let daemon = DaemonManager.status()
+            let command = (action == .reboot) ? "reboot" : "userspace"
+
+            // 重启走 root daemon：这是唯一不依赖 App 自身权限的路径。
+            if action == .reboot && daemon.alive {
+                let sent = DaemonManager.send(command)
+                detail = "daemon 在线(\(daemon.detail)) 命令投递=\(sent ? "ok" : "FAILED")"
+                logDiagnostic(detail)
+                // 命令生效的话设备马上就会重启，进程根本走不到这里；4 秒后还活着 = 没生效。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+                    let tail = DaemonManager.logTail(DaemonManager.daemonLogPath, lines: 6)
+                    self?.rebootURLHandled = false
+                    self?.showFailureAlert(action: action, detail: "\(detail)\n--- daemon 日志 ---\n\(tail)")
+                }
+                return
+            }
+
             let spawned = action == .reboot
                 ? deviceController.rebootDevice()
                 : deviceController.rebootUserspace()
             // 走到这里说明设备没有重启（重置成功的话进程早就被内核干掉了），
             // 所以不论 spawn 成功与否都要把 helper 的退出码和 stderr 显示出来。
             detail = "\(action.rawValue): spawn \(spawned ? "ok" : "FAILED") exit=\(deviceController.lastExitCode) \(String(describing: deviceController.lastLog ?? ""))"
+            if action == .reboot {
+                detail += "\ndaemon 状态: \(daemon.alive ? "在线" : "离线")（\(daemon.detail)）"
+            }
         }
 
         logDiagnostic(detail)

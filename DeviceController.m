@@ -73,6 +73,29 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restric
 	return result == 0;
 }
 
+- (BOOL) installDaemonWithDaemonAt:(NSString *)daemonPath plistAt:(NSString *)plistPath
+{
+	NSString *path = [[NSBundle mainBundle] pathForResource:@"RebootRootHelper" ofType:@""];
+	if (path == nil) {
+		_lastExitCode = -1;
+		_lastLog = @"RebootRootHelper not found in bundle";
+		return NO;
+	}
+
+	NSString *stdOut = nil;
+	NSString *stdErr = nil;
+	NSArray *args = @[@"install-daemon", daemonPath ?: @"", plistPath ?: @""];
+	int result = spawnRoot(path, args, &stdOut, &stdErr);
+
+	_lastExitCode = result;
+	_lastLog = [NSString stringWithFormat:@"%@ | exit=%d stdout=%@ stderr=%@",
+				gPersonaLog,
+				result,
+				stdOut.length ? stdOut : @"(empty)",
+				stdErr.length ? stdErr : @"(empty)"];
+	return result == 0;
+}
+
 - (BOOL) RebootUserspace
 {
     NSString *path = [[NSBundle mainBundle] pathForResource:@"RebootUserSpaceHelper" ofType:@""];

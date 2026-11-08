@@ -131,7 +131,7 @@ class RootViewController: UIViewController {
         diagTextView.translatesAutoresizingMaskIntoConstraints = false
         diagTextView.isEditable = false
         diagTextView.isSelectable = true
-        diagTextView.font = UIFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        diagTextView.font = UIFont.monospacedSystemFont(ofSize: 9, weight: .regular)
         diagTextView.textColor = .secondaryLabel
         diagTextView.backgroundColor = .secondarySystemBackground
         diagTextView.layer.cornerRadius = 6
@@ -178,7 +178,7 @@ class RootViewController: UIViewController {
             diagTextView.leadingAnchor.constraint(equalTo: self.view.leadingAnchor, constant: 12),
             diagTextView.trailingAnchor.constraint(equalTo: self.view.trailingAnchor, constant: -12),
             diagTextView.bottomAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
-            diagTextView.heightAnchor.constraint(equalToConstant: 120)
+            diagTextView.heightAnchor.constraint(equalToConstant: 168)
         ])
 
     }
@@ -232,23 +232,53 @@ class RootViewController: UIViewController {
         let appUid = getuid()
         let appEuid = geteuid()
         let permission = settingsUtils.checkInstallPermission()
-        diagTextView.text = "构建 \(build)\nApp uid=\(appUid) euid=\(appEuid)\n权限检查=\(permission)\nhelper 探测中…"
+        diagTextView.text = "构建 \(build)\nApp uid=\(appUid) euid=\(appEuid)\n权限检查=\(permission)\ndaemon 初始化中…"
 
         DispatchQueue.global(qos: .userInitiated).async {
+            // 首次运行尝试把 root 守护进程装进系统（这一步仍然需要 helper 真的拿到 root）。
+            var installLine = ""
+            let before = DaemonManager.status()
+            if before.alive {
+                installLine = "安装=已在线，跳过"
+            } else {
+                let (spawned, exit, log) = DaemonManager.installIfNeeded()
+                let first = log.split(separator: "\n").first.map(String.init) ?? log
+                installLine = "安装 spawn=\(spawned ? "ok" : "FAILED") exit=\(exit) \(first)"
+            }
+
             let controller = DeviceController()
-            let spawned = controller.probeHelperIdentity()
-            let log = controller.lastLog ?? ""
+            let probe = controller.probeHelperIdentity()
             let exitCode = controller.lastExitCode
-            let tail = RootViewController.logTail()
+
+            // daemon 被 launchd 拉起需要一点时间，最多等 3 秒再判定。
+            var status = DaemonManager.status()
+            var waited = 0.0
+            while !status.alive && waited < 3.0 {
+                Thread.sleep(forTimeInterval: 0.5)
+                waited += 0.5
+                status = DaemonManager.status()
+            }
+
+            let daemonLine = "daemon \(status.alive ? "在线" : "离线") \(status.detail)"
+            let dTail = DaemonManager.logTail(DaemonManager.daemonLogPath, lines: 4)
+            let iTail = DaemonManager.logTail(DaemonManager.installLogPath, lines: 4)
+            let uTail = RootViewController.logTail()
+
             let text = """
             构建 \(build)
             App uid=\(appUid) euid=\(appEuid)
             权限检查(可写 /var/mobile/Library/Preferences)=\(permission)
-            helper spawn \(spawned ? "ok" : "FAILED") exit=\(exitCode)
-            \(log)
+            \(daemonLine)
+            \(installLine)
+            身份探测 exit=\(exitCode) \(probe ? "ok" : "FAILED")
+            --- install.log ---
+            \(iTail)
+            --- daemon.log ---
+            \(dTail)
             --- URL 日志尾部 ---
-            \(tail)
+            \(uTail)
             """
+
             DispatchQueue.main.async {
                 self.diagTextView.text = text
             }

@@ -11,7 +11,7 @@ include $(THEOS)/makefiles/common.mk
 
 APPLICATION_NAME = RebootTools
 
-RebootTools_FILES = AppDelegate.swift RootViewController.swift SettingsViewController.swift DeviceController.m PlistManagerUtils.swift SettingsUtils.swift
+RebootTools_FILES = AppDelegate.swift RootViewController.swift SettingsViewController.swift DeviceController.m PlistManagerUtils.swift SettingsUtils.swift DaemonManager.swift
 RebootTools_FRAMEWORKS = UIKit CoreGraphics
 # Copy all files from Resources into the .app bundle. This is required for
 # Info.plist, LaunchScreen.storyboardc, and both executable helper tools.

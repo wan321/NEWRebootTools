@@ -15,6 +15,9 @@
 /// 只把 RootHelper 以 root 身份跑起来并读回它的 uid/euid，不重启设备。
 /// 用来验证 posix_spawn persona 提权是否真的生效（返回值仅代表 spawn 是否成功）。
 - (BOOL) probeHelperIdentity;
+/// 以 root 身份执行 `RebootRootHelper install-daemon <daemon> <plist>`，
+/// 把 RebootDaemon 装进 /usr/libexec 并注册为开机自启的 launchd 守护进程。
+- (BOOL) installDaemonWithDaemonAt:(NSString *)daemonPath plistAt:(NSString *)plistPath;
 - (void) Respring;
 /// 与 Respring 相同，但会统计真正杀掉了几个 SpringBoard：一个都没杀掉时不 exit，
 /// 让上层能把「注销其实没成功」显示出来（旧实现无论 kill 成功与否都 exit(0)，

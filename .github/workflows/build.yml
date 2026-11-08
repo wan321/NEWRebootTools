@@ -51,6 +51,7 @@ jobs:
 
           test -f Makefile
           test -f RebootRootHelper/Makefile
+          test -f RebootDaemon/Makefile
           test -d Resources
 
           echo "Project structure:"
@@ -137,7 +138,77 @@ jobs:
             fi
           done
 
-      # 6. 编译主程序并生成 IPA
+      # 6. 编译常驻 root 守护进程 RebootDaemon
+      - name: Build RebootDaemon
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          make -C RebootDaemon clean || true
+          make -C RebootDaemon FINALPACKAGE=1
+
+          # 与 RebootRootHelper 同样的 dSYM 陷阱：只能接受真正的可执行 Mach-O。
+          DAEMON=""
+
+          candidates=()
+          if [ -f RebootDaemon/.theos/obj/RebootDaemon ]; then
+            candidates+=("RebootDaemon/.theos/obj/RebootDaemon")
+          fi
+          while IFS= read -r file; do
+            candidates+=("$file")
+          done < <(
+            find RebootDaemon/.theos/obj \
+              -type f \
+              -name RebootDaemon \
+              -not -path '*.dSYM/*' \
+              -print
+          )
+
+          if (( ${#candidates[@]} == 0 )); then
+            echo "ERROR: RebootDaemon executable not found."
+            find RebootDaemon -type f -print
+            exit 1
+          fi
+
+          for cand in "${candidates[@]}"; do
+            desc="$(file -b "$cand")"
+            echo "candidate: $cand -> $desc"
+            case "$desc" in
+              *Mach-O*executable*)
+                DAEMON="$cand"
+                break
+                ;;
+            esac
+          done
+
+          if [ -z "$DAEMON" ]; then
+            echo "ERROR: RebootDaemon executable not found."
+            exit 1
+          fi
+
+          echo "Daemon found: $DAEMON"
+          otool -hv "$DAEMON"
+          if otool -hv "$DAEMON" | grep -qiE 'DSYM|OBJECT'; then
+            echo "ERROR: daemon is not an executable Mach-O."
+            exit 1
+          fi
+
+          cp "$DAEMON" Resources/RebootDaemon
+          chmod +x Resources/RebootDaemon
+
+          echo "========== DAEMON ENTITLEMENTS =========="
+          ldid -e Resources/RebootDaemon
+          for key in 'platform-application' 'com.apple.private.security.no-sandbox'; do
+            if ! ldid -e Resources/RebootDaemon | grep -q "$key"; then
+              echo "ERROR: RebootDaemon entitlements missing $key"
+              exit 1
+            fi
+          done
+
+          test -f Resources/com.wan.reboottools.daemon.plist
+          plutil -lint Resources/com.wan.reboottools.daemon.plist
+
+      # 7. 编译主程序并生成 IPA
       - name: Build main application
         shell: bash
         run: |
@@ -151,7 +222,7 @@ jobs:
 
           echo "Build completed."
 
-      # 7. 收集 TIPA
+      # 8. 收集 TIPA
       - name: Collect TIPA
         shell: bash
         run: |
@@ -184,7 +255,7 @@ jobs:
           echo "Final package:"
           ls -lh dist/RebootTools-Shortcuts.tipa
 
-      # 8. 检查安装包
+      # 9. 检查安装包
       - name: Verify TIPA
         shell: bash
         run: |
@@ -233,6 +304,51 @@ jobs:
 
           echo "========== HELPER =========="
 
+          echo "========== DAEMON =========="
+
+
+          if [ -f "$APP/RebootDaemon" ]; then
+
+
+            file "$APP/RebootDaemon"
+
+
+            otool -hv "$APP/RebootDaemon"
+
+
+            ldid -e "$APP/RebootDaemon"
+
+
+            if otool -hv "$APP/RebootDaemon" | grep -qiE 'DSYM|OBJECT'; then
+
+
+              echo "ERROR: bundled RebootDaemon is a debug-symbol file, not an executable."
+
+
+              exit 1
+
+
+            fi
+
+
+            test -f "$APP/com.wan.reboottools.daemon.plist"
+
+
+          else
+
+
+            echo "ERROR: RebootDaemon missing inside app."
+
+
+            exit 1
+
+
+          fi
+
+
+          
+
+
           if [ -f "$APP/RebootRootHelper" ]; then
             file "$APP/RebootRootHelper"
             otool -hv "$APP/RebootRootHelper"
@@ -254,7 +370,7 @@ jobs:
 
           echo "TIPA verification completed."
 
-      # 9. 上传 GitHub 构建产物
+      # 10. 上传 GitHub 构建产物
       - name: Upload TIPA
         uses: actions/upload-artifact@v4
         with:
