@@ -1,0 +1,51 @@
+name: Build RebootTools Shortcuts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Theos' documented setup action currently supports macOS runners.
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Theos
+        uses: waruhachi/theos-action@v2.6.3
+        with:
+          theos-src: theos/theos
+          theos-branch: master
+          sdks-src: theos/sdks
+          sdks-branch: master
+          remotelog: false
+          libgcuniversal: false
+          altlist: false
+          comet: false
+          orion: false
+
+      - name: Validate source and helper binaries
+        run: bash scripts/validate-source.sh
+
+      - name: Build IPA
+        run: |
+          set -euo pipefail
+          make clean
+          make package FINALPACKAGE=1 PACKAGE_FORMAT=ipa
+
+      - name: Verify and normalize TrollStore package
+        run: bash scripts/verify-package.sh
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RebootTools-Shortcuts-TrollStore
+          path: dist/RebootTools-Shortcuts.tipa
+          if-no-files-found: error
+          retention-days: 14
