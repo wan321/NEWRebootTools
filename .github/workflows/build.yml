@@ -1,51 +1,183 @@
+
 name: Build RebootTools Shortcuts
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   build:
-    # Theos' documented setup action currently supports macOS runners.
-    runs-on: macos-latest
-    timeout-minutes: 30
+    name: Build TrollStore TIPA
+    runs-on: macos-15
+
+    env:
+      THEOS: ${{ runner.temp }}/theos
+
     steps:
+      # 1. 获取源码
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Set up Theos
-        uses: waruhachi/theos-action@v2.6.3
-        with:
-          theos-src: theos/theos
-          theos-branch: master
-          sdks-src: theos/sdks
-          sdks-branch: master
-          remotelog: false
-          libgcuniversal: false
-          altlist: false
-          comet: false
-          orion: false
+      # 2. 安装构建依赖
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install ldid dpkg xz
 
-      - name: Validate source and helper binaries
-        run: bash scripts/validate-source.sh
+      # 3. 安装 Theos
+      - name: Install Theos
+        run: |
+          git clone --recursive https://github.com/theos/theos.git "$THEOS"
+          mkdir -p "$THEOS/sdks"
 
-      - name: Build IPA
+          git clone https://github.com/theos/sdks.git "$RUNNER_TEMP/theos-sdks"
+
+          find "$RUNNER_TEMP/theos-sdks" \
+            -maxdepth 1 \
+            -type d \
+            -name "*.sdk" \
+            -exec cp -R {} "$THEOS/sdks/" \;
+
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+
+          echo "Installed SDKs:"
+          ls -lah "$THEOS/sdks"
+
+      # 4. 检查源码和 Helper
+      - name: Validate source
         run: |
           set -euo pipefail
+
+          plutil -lint Resources/Info.plist
+
+          grep -q "reboottools" Resources/Info.plist || {
+            echo "URL Scheme reboottools missing"
+            exit 1
+          }
+
+          grep -q "RebootTools_RESOURCE_DIRS = Resources" Makefile || {
+            echo "Resources directory configuration missing"
+            exit 1
+          }
+
+          for helper in \
+            Resources/RebootRootHelper \
+            Resources/RebootUserSpaceHelper
+          do
+            test -s "$helper" || {
+              echo "Missing helper: $helper"
+              exit 1
+            }
+
+            chmod +x "$helper"
+
+            echo "Checking architecture: $helper"
+            lipo "$helper" -verify_arch arm64
+
+            echo "Helper OK: $helper"
+          done
+
+      # 5. 编译应用并生成 TIPA
+      - name: Build package
+        run: |
+          set -euo pipefail
+
           make clean
-          make package FINALPACKAGE=1 PACKAGE_FORMAT=ipa
 
-      - name: Verify and normalize TrollStore package
-        run: bash scripts/verify-package.sh
+          make package \
+            FINALPACKAGE=1 \
+            PACKAGE_FORMAT=ipa
 
-      - name: Upload build artifact
+          echo "Build output:"
+          find packages -maxdepth 1 -type f -print
+
+      # 6. 统一输出文件名
+      - name: Prepare TIPA
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+
+          PACKAGE=""
+
+          for file in packages/*.tipa packages/*.ipa; do
+            if [ -f "$file" ]; then
+              PACKAGE="$file"
+              break
+            fi
+          done
+
+          if [ -z "$PACKAGE" ]; then
+            echo "No IPA or TIPA package was generated."
+            exit 1
+          fi
+
+          cp "$PACKAGE" dist/RebootTools-Shortcuts.tipa
+
+          echo "Final package:"
+          ls -lh dist/RebootTools-Shortcuts.tipa
+
+      # 7. 验证 TIPA 内容
+      - name: Verify TIPA package
+        run: |
+          set -euo pipefail
+
+          TIPA="dist/RebootTools-Shortcuts.tipa"
+          TEMP_DIR="$(mktemp -d)"
+
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+
+          test -s "$TIPA"
+
+          unzip -q "$TIPA" -d "$TEMP_DIR"
+
+          APP="$TEMP_DIR/Payload/RebootTools.app"
+
+          test -d "$APP" || {
+            echo "Payload/RebootTools.app missing"
+            exit 1
+          }
+
+          test -s "$APP/RebootRootHelper" || {
+            echo "RebootRootHelper missing from app"
+            exit 1
+          }
+
+          test -s "$APP/RebootUserSpaceHelper" || {
+            echo "RebootUserSpaceHelper missing from app"
+            exit 1
+          }
+
+          for helper in \
+            "$APP/RebootRootHelper" \
+            "$APP/RebootUserSpaceHelper"
+          do
+            lipo "$helper" -verify_arch arm64
+
+            if [ ! -x "$helper" ]; then
+              echo "Helper is not executable in package: $helper"
+              exit 1
+            fi
+          done
+
+          /usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' \
+            "$APP/Info.plist" | grep -qx "reboottools"
+
+          echo "TIPA package verification passed."
+          echo "Package size:"
+          ls -lh "$TIPA"
+
+      # 8. 上传最终 TIPA
+      - name: Upload TIPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RebootTools-Shortcuts-TrollStore
+          name: RebootTools-Shortcuts-TIPA
           path: dist/RebootTools-Shortcuts.tipa
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
