@@ -7,6 +7,7 @@ TOOL_NAME = RebootRootHelper
 
 RebootRootHelper_FILES = main.m
 RebootRootHelper_CFLAGS = -fobjc-arc
+RebootRootHelper_FRAMEWORKS = Foundation
 RebootRootHelper_CODESIGN_FLAGS = -Sentitlements.plist
 RebootRootHelper_INSTALL_PATH = /usr/local/bin
 

@@ -14,58 +14,57 @@
 //
 // 真机排查时，"helper 到底有没有以 root 身份跑起来"比 reboot 的返回值更关键：
 // reboot(2) 在内核里走 suser()，uid 不是 0 必然 EPERM。
+//
+// 注意：iOS 上没有 NSTask，所有外部命令都走 system()，输出直接追加到 install.log。
 
 static NSString *const kBaseDir = @"/var/mobile/Library/Caches/com.wan.reboottools";
 static NSString *const kInstallLog = @"/var/mobile/Library/Caches/com.wan.reboottools/install.log";
 
-static void installLogAppend(NSString *line, NSMutableString *accum)
+static void installLogAppend(NSString *line)
 {
 	fprintf(stderr, "%s\n", [line UTF8String]);
-	[accum appendFormat:@"%@\n", line];
+	NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:kInstallLog];
+	if (fh == nil) {
+		[[NSFileManager defaultManager] createFileAtPath:kInstallLog contents:nil attributes:nil];
+		fh = [NSFileHandle fileHandleForWritingAtPath:kInstallLog];
+	}
+	if (fh == nil) {
+		return;
+	}
+	@try {
+		[fh seekToEndOfFile];
+		[fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
+		[fh closeFile];
+	} @catch (__unused NSException *e) {
+	}
 }
 
-static BOOL runCommand(NSString *command, NSMutableString *out)
+static int runCommand(NSString *command)
 {
-	NSTask *task = [[NSTask alloc] init];
-	task.launchPath = @"/bin/sh";
-	task.arguments = @[@"-c", command];
-	NSPipe *pipe = [NSPipe pipe];
-	task.standardOutput = pipe;
-	task.standardError = pipe;
-	@try {
-		[task launch];
-		[task waitUntilExit];
-	} @catch (__unused NSException *e) {
-		return NO;
-	}
-	NSData *data = [pipe.fileHandleForReading readDataToEndOfFile];
-	NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-	if (text.length) {
-		[out appendFormat:@"$ %@\n%@", command, text];
-		fprintf(stderr, "[cmd] %s\n%s\n", [command UTF8String], [text UTF8String]);
-	}
-	return task.terminationStatus == 0;
+	// 退出码也写进日志，事后能分辨「命令没跑」和「命令跑了但失败」。
+	NSString *full = [NSString stringWithFormat:@"%@ >> %@ 2>&1; echo \"[exit=$?] %@\" >> %@",
+					  command, kInstallLog, command, kInstallLog];
+	return system([full UTF8String]);
 }
 
 static int installDaemon(NSString *daemonSrc, NSString *plistSrc)
 {
-	NSMutableString *log = [NSMutableString string];
 	NSFileManager *fm = [NSFileManager defaultManager];
 
 	[fm createDirectoryAtPath:kBaseDir withIntermediateDirectories:YES
 				   attributes:@{NSFilePosixPermissions : @0777} error:NULL];
+	[fm createFileAtPath:kInstallLog contents:nil attributes:nil];
 
-	installLogAppend([NSString stringWithFormat:@"uid=%u euid=%u", (unsigned)getuid(), (unsigned)geteuid()], log);
+	installLogAppend([NSString stringWithFormat:@"=== install-daemon 开始 uid=%u euid=%u ===",
+					  (unsigned)getuid(), (unsigned)geteuid()]);
 
 	if (getuid() != 0) {
-		installLogAppend(@"NOT ROOT，无法写 /Library/LaunchDaemons", log);
-		[[log copy] writeToFile:kInstallLog atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+		installLogAppend(@"NOT ROOT：无法写 /Library/LaunchDaemons，daemon 不可能装上");
 		return 2;
 	}
 
 	if (![fm fileExistsAtPath:daemonSrc] || ![fm fileExistsAtPath:plistSrc]) {
-		installLogAppend([NSString stringWithFormat:@"缺少源文件 daemon=%@ plist=%@", daemonSrc, plistSrc], log);
-		[[log copy] writeToFile:kInstallLog atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+		installLogAppend([NSString stringWithFormat:@"缺少源文件 daemon=%@ plist=%@", daemonSrc, plistSrc]);
 		return 3;
 	}
 
@@ -77,13 +76,11 @@ static int installDaemon(NSString *daemonSrc, NSString *plistSrc)
 
 	NSError *err = nil;
 	if (![fm copyItemAtPath:daemonSrc toPath:daemonDst error:&err]) {
-		installLogAppend([NSString stringWithFormat:@"复制 daemon 失败: %@", err.localizedDescription], log);
-		[[log copy] writeToFile:kInstallLog atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+		installLogAppend([NSString stringWithFormat:@"复制 daemon 失败: %@", err.localizedDescription]);
 		return 4;
 	}
 	if (![fm copyItemAtPath:plistSrc toPath:plistDst error:&err]) {
-		installLogAppend([NSString stringWithFormat:@"复制 plist 失败: %@", err.localizedDescription], log);
-		[[log copy] writeToFile:kInstallLog atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+		installLogAppend([NSString stringWithFormat:@"复制 plist 失败: %@", err.localizedDescription]);
 		return 5;
 	}
 
@@ -92,22 +89,22 @@ static int installDaemon(NSString *daemonSrc, NSString *plistSrc)
 	chown([daemonDst UTF8String], 0, 0);
 	chown([plistDst UTF8String], 0, 0);
 
-	// 日志/命令目录要被 mobile 读写，否则 App 无法投递命令。
+	// 命令/日志目录必须让 mobile 可读写，否则 App 无法投递命令。
 	chmod([kBaseDir UTF8String], 0777);
 	chown([kBaseDir UTF8String], 501, 501);
 
-	installLogAppend(@"文件已就位：/usr/libexec/RebootDaemon + /Library/LaunchDaemons/com.wan.reboottools.daemon.plist", log);
+	installLogAppend(@"文件已就位：/usr/libexec/RebootDaemon + /Library/LaunchDaemons/com.wan.reboottools.daemon.plist");
 
 	// iOS 13+ 用 bootstrap system；老版本回退到 load -w。
-	BOOL ok = runCommand(@"launchctl bootstrap system /Library/LaunchDaemons/com.wan.reboottools.daemon.plist", log);
+	int rc = runCommand(@"launchctl bootstrap system /Library/LaunchDaemons/com.wan.reboottools.daemon.plist");
+	BOOL ok = (rc == 0);
 	if (!ok) {
-		ok = runCommand(@"launchctl load -w /Library/LaunchDaemons/com.wan.reboottools.daemon.plist", log);
+		rc = runCommand(@"launchctl load -w /Library/LaunchDaemons/com.wan.reboottools.daemon.plist");
+		ok = (rc == 0);
 	}
-	runCommand(@"launchctl list | grep -i reboottools", log);
+	runCommand(@"launchctl list | grep -i reboottools || true");
 
-	installLogAppend(ok ? @"launchctl 已加载 daemon" : @"launchctl 加载失败", log);
-	[[log copy] writeToFile:kInstallLog atomically:YES encoding:NSUTF8StringEncoding error:NULL];
-
+	installLogAppend(ok ? @"launchctl 已加载 daemon" : @"launchctl 加载失败");
 	return ok ? 0 : 6;
 }
 
