@@ -1,0 +1,9 @@
+Package: com.developlab.reboottools
+Name: RebootTools
+Version: 1.2.1
+Architecture: iphoneos-arm
+Description: TrollStore app reboot your device.
+Maintainer: developlab
+Author: developlab
+Section: Utilities
+Depends: firmware (>= 14.0) | ${LIBSWIFT}
