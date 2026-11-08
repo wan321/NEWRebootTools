@@ -65,17 +65,43 @@ jobs:
           make -C RebootRootHelper clean || true
           make -C RebootRootHelper FINALPACKAGE=1
 
+          # 只接受真正的可执行 Mach-O：必须排除 .dSYM 里的 DWARF 调试符号文件。
+          # 曾经因为 find 命中了 .theos/obj/arm64e/*.dSYM/Contents/Resources/DWARF/，
+          # 把一个 MH_DSYM 文件当成 helper 打进 app，TrollStore 的 ldid 签名时报
+          # Install Error 175（Failed to sign the app）。
           HELPER=""
 
+          candidates=()
+          if [ -f RebootRootHelper/.theos/obj/RebootRootHelper ]; then
+            candidates+=("RebootRootHelper/.theos/obj/RebootRootHelper")
+          fi
           while IFS= read -r file; do
-            HELPER="$file"
-            break
+            candidates+=("$file")
           done < <(
             find RebootRootHelper/.theos/obj \
               -type f \
               -name RebootRootHelper \
+              -not -path '*.dSYM/*' \
               -print
           )
+
+          # bash 3.2（macOS 默认）+ set -u 下，空数组展开 "${arr[@]}" 会报 unbound variable
+          if (( ${#candidates[@]} == 0 )); then
+            echo "ERROR: RebootRootHelper executable not found."
+            find RebootRootHelper -type f -print
+            exit 1
+          fi
+
+          for cand in "${candidates[@]}"; do
+            desc="$(file -b "$cand")"
+            echo "candidate: $cand -> $desc"
+            case "$desc" in
+              *Mach-O*executable*)
+                HELPER="$cand"
+                break
+                ;;
+            esac
+          done
 
           if [ -z "$HELPER" ]; then
             echo "ERROR: RebootRootHelper executable not found."
@@ -84,6 +110,14 @@ jobs:
           fi
 
           echo "Helper found: $HELPER"
+          file "$HELPER"
+          otool -hv "$HELPER"
+
+          # 硬性闸门：必须是 EXECUTE，不能是 DSYM/OBJECT。
+          if otool -hv "$HELPER" | grep -qiE 'DSYM|OBJECT'; then
+            echo "ERROR: helper is not an executable Mach-O."
+            exit 1
+          fi
 
           mkdir -p Resources
           cp "$HELPER" Resources/RebootRootHelper
@@ -190,6 +224,11 @@ jobs:
 
           if [ -f "$APP/RebootRootHelper" ]; then
             file "$APP/RebootRootHelper"
+            otool -hv "$APP/RebootRootHelper"
+            if otool -hv "$APP/RebootRootHelper" | grep -qiE 'DSYM|OBJECT'; then
+              echo "ERROR: bundled RebootRootHelper is a debug-symbol file, not an executable."
+              exit 1
+            fi
           else
             echo "WARNING: RebootRootHelper not found inside app."
           fi
