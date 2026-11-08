@@ -8,6 +8,9 @@ class RootViewController: UIViewController {
 	private let settingsUtils = SettingsUtils.instance
     private let checkPermissionLabel = UILabel()
     private let respringButton = UIButton(type: .system)
+    // 常驻诊断面板：启动即自动探测 root 能力，结果直接显示在屏幕上，
+    // 不依赖 URL Scheme 是否送达、也不依赖弹窗是否被看见。
+    private let diagTextView = UITextView()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -124,6 +127,18 @@ class RootViewController: UIViewController {
         self.view.addSubview(respringButton)
         self.view.addSubview(settingsButton)
 
+        // 诊断面板（可选中复制）
+        diagTextView.translatesAutoresizingMaskIntoConstraints = false
+        diagTextView.isEditable = false
+        diagTextView.isSelectable = true
+        diagTextView.font = UIFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        diagTextView.textColor = .secondaryLabel
+        diagTextView.backgroundColor = .secondarySystemBackground
+        diagTextView.layer.cornerRadius = 6
+        diagTextView.text = "诊断信息加载中…"
+        diagTextView.textContainerInset = UIEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
+        self.view.addSubview(diagTextView)
+
         // AutoLayout
         NSLayoutConstraint.activate([
             iconImageView.widthAnchor.constraint(equalToConstant: 100),  // 设置宽度
@@ -158,7 +173,12 @@ class RootViewController: UIViewController {
             settingsButton.heightAnchor.constraint(equalToConstant: 50),
             settingsButton.topAnchor.constraint(equalTo: respringButton.bottomAnchor, constant: 30),
             settingsButton.leadingAnchor.constraint(equalTo: self.view.leadingAnchor, constant: 50), // 左侧边距
-            settingsButton.trailingAnchor.constraint(equalTo: self.view.trailingAnchor, constant: -50) // 右侧边距
+            settingsButton.trailingAnchor.constraint(equalTo: self.view.trailingAnchor, constant: -50), // 右侧边距
+
+            diagTextView.leadingAnchor.constraint(equalTo: self.view.leadingAnchor, constant: 12),
+            diagTextView.trailingAnchor.constraint(equalTo: self.view.trailingAnchor, constant: -12),
+            diagTextView.bottomAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
+            diagTextView.heightAnchor.constraint(equalToConstant: 120)
         ])
 
     }
@@ -198,6 +218,53 @@ class RootViewController: UIViewController {
                 self.onClickRespringButton()
             }
         }
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        refreshDiagnostics()
+    }
+
+    /// 启动即自动跑一次身份探测（不改动设备），把结果常驻在屏幕下方。
+    /// 这样即使 URL Scheme 没送达、弹窗被错过，只要打开 App 也能看到一手数据。
+    private func refreshDiagnostics() {
+        let build = AppDelegate.buildTag
+        let appUid = getuid()
+        let appEuid = geteuid()
+        let permission = settingsUtils.checkInstallPermission()
+        diagTextView.text = "构建 \(build)\nApp uid=\(appUid) euid=\(appEuid)\n权限检查=\(permission)\nhelper 探测中…"
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let controller = DeviceController()
+            let spawned = controller.probeHelperIdentity()
+            let log = controller.lastLog ?? ""
+            let exitCode = controller.lastExitCode
+            let tail = RootViewController.logTail()
+            let text = """
+            构建 \(build)
+            App uid=\(appUid) euid=\(appEuid)
+            权限检查(可写 /var/mobile/Library/Preferences)=\(permission)
+            helper spawn \(spawned ? "ok" : "FAILED") exit=\(exitCode)
+            \(log)
+            --- URL 日志尾部 ---
+            \(tail)
+            """
+            DispatchQueue.main.async {
+                self.diagTextView.text = text
+            }
+        }
+    }
+
+    /// 读取 Documents/reboottools-url.log 的最后几行，判断 URL 到底有没有送达。
+    private static func logTail() -> String {
+        guard let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return "(无 Documents)"
+        }
+        let file = dir.appendingPathComponent("reboottools-url.log")
+        guard let content = try? String(contentsOf: file, encoding: .utf8) else {
+            return "(无 URL 记录)"
+        }
+        return content.split(separator: "\n").suffix(3).joined(separator: "\n")
     }
 
     @objc func onClickRebootButton() {

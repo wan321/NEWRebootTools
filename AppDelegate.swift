@@ -96,7 +96,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     /// 打进二进制的构建标记，方便一眼确认手机装的是哪一版。
-    static let buildTag = "v5-diag"
+    static let buildTag = "v6-diag"
 
     private func rebootURLAction(from url: URL) -> RebootURLAction? {
         guard url.scheme?.lowercased() == "reboottools" else { return nil }
