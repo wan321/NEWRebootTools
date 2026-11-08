@@ -74,7 +74,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         return true
     }
 
-    /// URL Scheme 支持的三级动作，与 App 内三个按钮一一对应。
+    /// URL Scheme 支持的动作，与 App 内按钮一一对应；whoami 只探测身份，不动设备。
     private enum RebootURLAction: String {
         /// 整机断电重启（RebootRootHelper → reboot(0)）
         case reboot
@@ -82,15 +82,21 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         case userspace
         /// 注销回桌面（killall SpringBoard）
         case respring
+        /// 只把 root helper 跑起来读回 uid/euid，用于验证提权是否生效
+        case whoami
 
         var displayName: String {
             switch self {
             case .reboot: return "重启设备"
             case .userspace: return "用户空间重启"
             case .respring: return "注销"
+            case .whoami: return "身份探测"
             }
         }
     }
+
+    /// 打进二进制的构建标记，方便一眼确认手机装的是哪一版。
+    static let buildTag = "v5-diag"
 
     private func rebootURLAction(from url: URL) -> RebootURLAction? {
         guard url.scheme?.lowercased() == "reboottools" else { return nil }
@@ -119,11 +125,24 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         let deviceController = DeviceController()
         let detail: String
 
+        if action == .whoami {
+            // 身份探测只回报，不按「失败」措辞。
+            _ = deviceController.probeHelperIdentity()
+            let report = "exit=\(deviceController.lastExitCode)\n\(deviceController.lastLog ?? "")"
+            logDiagnostic("whoami: \(report)")
+            rebootURLHandled = false
+            showReportAlert(title: "RebootTools \(AppDelegate.buildTag) · 身份探测", detail: report)
+            return
+        }
+
         switch action {
         case .respring:
             // 注销不经过 Helper；只有一个 SpringBoard 都没杀掉时才会返回。
             _ = deviceController.respringAndReport()
             detail = "\(action.rawValue): \(String(describing: deviceController.lastLog ?? ""))"
+        case .whoami:
+            // 已在上面单独处理，这里只为穷尽 switch。
+            detail = "whoami"
         case .reboot, .userspace:
             let spawned = action == .reboot
                 ? deviceController.rebootDevice()
@@ -138,14 +157,24 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         showFailureAlert(action: action, detail: detail)
     }
 
-    /// 执行前的确认闪窗：显示收到的 URL、解析出的动作、App 的 uid。
+    /// 执行前的确认窗：显示收到的 URL、解析出的动作、App 的 uid。
+    /// 故意不自动消失，必须点一下——之前 1 秒自动闪窗在有别的弹窗时会整个看不见，
+    /// 于是"到底有没有收到 URL"永远查不清。
     private func showReceiptAlert(action: RebootURLAction, url: URL, completion: @escaping () -> Void) {
-        let message = "\(url.absoluteString)\n动作：\(action.displayName)　uid=\(getuid())"
+        let message = "\(url.absoluteString)\n动作：\(action.displayName)\nApp uid=\(getuid()) euid=\(geteuid())\n构建：\(AppDelegate.buildTag)"
         let alert = UIAlertController(title: "已收到 RebootTools 请求", message: message, preferredStyle: .alert)
-        presenter()?.present(alert, animated: true)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            alert.dismiss(animated: false) { completion() }
+        alert.addAction(UIAlertAction(title: "执行", style: .destructive) { _ in
+            completion()
+        })
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in
+            self?.rebootURLHandled = false
+        })
+        guard let host = presenter() else {
+            logDiagnostic("receipt alert: no presenter, executing directly")
+            completion()
+            return
         }
+        host.present(alert, animated: true)
     }
 
     private func presenter() -> UIViewController? {
@@ -155,7 +184,19 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     /// 失败/未生效时给出可见反馈。
     private func showFailureAlert(action: RebootURLAction, detail: String) {
         let message = "「\(action.displayName)」未能生效。\n\n\(detail)"
-        let alert = UIAlertController(title: "RebootTools", message: message, preferredStyle: .alert)
+        let alert = UIAlertController(title: "RebootTools \(AppDelegate.buildTag)", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "好", style: .default))
+        alert.addAction(UIAlertAction(title: "复制详情", style: .default) { _ in
+            UIPasteboard.general.string = detail
+        })
+        DispatchQueue.main.async {
+            self.presenter()?.present(alert, animated: true)
+        }
+    }
+
+    /// 只报告结果的弹窗（身份探测用），必须点「好」才能继续。
+    private func showReportAlert(title: String, detail: String) {
+        let alert = UIAlertController(title: title, message: detail, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "好", style: .default))
         alert.addAction(UIAlertAction(title: "复制详情", style: .default) { _ in
             UIPasteboard.general.string = detail

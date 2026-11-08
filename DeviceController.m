@@ -13,6 +13,9 @@
 	int _lastKilledCount;
 }
 
+// 最近一次 spawnRoot 里 persona（提权）设置的结果，拼进 lastLog 供界面显示。
+static NSString *gPersonaLog = @"";
+
 @synthesize lastExitCode = _lastExitCode;
 @synthesize lastLog = _lastLog;
 @synthesize lastKilledCount = _lastKilledCount;
@@ -40,11 +43,33 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restric
 	// 必须把 helper 的退出码和 stderr 带出去：reboot(0) 被内核拒绝时
 	// 只有这里才能看到真实原因（EPERM 等），否则表现为静默失败。
 	_lastExitCode = result;
-	_lastLog = [NSString stringWithFormat:@"exit=%d stdout=%@ stderr=%@",
+	_lastLog = [NSString stringWithFormat:@"%@ | exit=%d stdout=%@ stderr=%@",
+				gPersonaLog,
 				result,
 				stdOut.length ? stdOut : @"(empty)",
 				stdErr.length ? stdErr : @"(empty)"];
 
+	return result == 0;
+}
+
+- (BOOL) probeHelperIdentity
+{
+	NSString *path = [[NSBundle mainBundle] pathForResource:@"RebootRootHelper" ofType:@""];
+	if (path == nil) {
+		_lastExitCode = -1;
+		_lastLog = @"RebootRootHelper not found in bundle";
+		return NO;
+	}
+
+	NSString *stdOut = nil;
+	NSString *stdErr = nil;
+	int result = spawnRoot(path, @[@"whoami"], &stdOut, &stdErr);
+	_lastExitCode = result;
+	_lastLog = [NSString stringWithFormat:@"%@ | exit=%d stdout=%@ stderr=%@",
+				gPersonaLog,
+				result,
+				stdOut.length ? stdOut : @"(empty)",
+				stdErr.length ? stdErr : @"(empty)"];
 	return result == 0;
 }
 
@@ -64,7 +89,8 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restric
 
     int result = spawnRoot(path, args, &stdOut, &stdErr);
     _lastExitCode = result;
-    _lastLog = [NSString stringWithFormat:@"exit=%d stdout=%@ stderr=%@",
+    _lastLog = [NSString stringWithFormat:@"%@ | exit=%d stdout=%@ stderr=%@",
+                gPersonaLog,
                 result,
                 stdOut.length ? stdOut : @"(empty)",
                 stdErr.length ? stdErr : @"(empty)"];
@@ -129,9 +155,25 @@ int spawnRoot(NSString* path, NSArray* args, NSString** stdOut, NSString** stdEr
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
 
-    posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
-    posix_spawnattr_set_persona_uid_np(&attr, 0);
-    posix_spawnattr_set_persona_gid_np(&attr, 0);
+    // 这三个调用决定 helper 能不能拿到 root：persona 覆盖需要
+    // com.apple.private.persona-mgmt，且必须被内核真正接受。
+    // 原来直接忽略返回值，失败时 helper 会以 mobile 身份静默运行，
+    // reboot(0) 必然 EPERM —— 这正是「点了没反应」最难查的一层。
+    errno = 0;
+    int personaErr = posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
+    int personaErrno = errno;
+    errno = 0;
+    int personaUidErr = posix_spawnattr_set_persona_uid_np(&attr, 0);
+    int personaUidErrno = errno;
+    errno = 0;
+    int personaGidErr = posix_spawnattr_set_persona_gid_np(&attr, 0);
+    int personaGidErrno = errno;
+
+    gPersonaLog = [NSString stringWithFormat:@"app uid=%d euid=%d | persona set=%d(errno=%d) uid=%d(errno=%d) gid=%d(errno=%d)",
+                   getuid(), geteuid(),
+                   personaErr, personaErrno,
+                   personaUidErr, personaUidErrno,
+                   personaGidErr, personaGidErrno];
 
     posix_spawn_file_actions_t action;
     posix_spawn_file_actions_init(&action);

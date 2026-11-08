@@ -165,6 +165,8 @@ class RootViewController: UIViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        // 标题带上构建标记：真机上一眼能确认装的是哪一版，避免"改了没生效"的误判。
+        self.title = "\(NSLocalizedString("CFBundleDisplayName", comment: "")) · \(AppDelegate.buildTag)"
         
         // 桌面快捷方式的回调
         onClickQuickAction = { [weak self] actionType in

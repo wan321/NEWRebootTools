@@ -7,6 +7,11 @@
 | `reboottools://reboot` | 重启设备 | `RebootRootHelper` → `reboot(0)` | Apple 开机 logo，整机断电重启 |
 | `reboottools://userspace` | 用户空间重启 | `RebootUserSpaceHelper` → launchd userspace-reboot | 短暂黑屏后回到锁屏 |
 | `reboottools://respring` | 注销 | `killall SpringBoard` | 一瞬间回到桌面 |
+| `reboottools://whoami` | 身份探测 | 只把 `RebootRootHelper` 以 root 跑起来并读回 `uid/euid`，**不动设备** | 弹出报告：helper 的 uid/euid 与 persona 设置结果 |
+
+> `whoami` 是排查用：`reboot(2)` 在内核里要求 uid 0，如果 helper 报 `uid=501`，说明
+> `posix_spawn` 的 persona 提权没有生效（缺少 `com.apple.private.persona-mgmt` 或被忽略），
+> 那么重启必然 EPERM——此时无论点多少次都不会有 Apple logo。
 
 在 iPhone 上：
 
