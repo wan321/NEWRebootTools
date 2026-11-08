@@ -1,9 +1,11 @@
 #include <errno.h>
 #include <stdio.h>
+#include <spawn.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #import <Foundation/Foundation.h>
 
@@ -42,9 +44,30 @@ static void installLogAppend(NSString *line)
 static int runCommand(NSString *command)
 {
 	// 退出码也写进日志，事后能分辨「命令没跑」和「命令跑了但失败」。
+	// iOS SDK 里 NSTask 和 system() 都不可用（分别是不存在和显式标记 unavailable），
+	// 所以直接用 posix_spawn 起 /bin/sh。
 	NSString *full = [NSString stringWithFormat:@"%@ >> %@ 2>&1; echo \"[exit=$?] %@\" >> %@",
 					  command, kInstallLog, command, kInstallLog];
-	return system([full UTF8String]);
+
+	char *argv[4];
+	argv[0] = "/bin/sh";
+	argv[1] = "-c";
+	argv[2] = (char *)[full UTF8String];
+	argv[3] = NULL;
+
+	for (int attempt = 0; attempt < 3; attempt++) {
+		pid_t pid = 0;
+		int rc = posix_spawn(&pid, "/bin/sh", NULL, NULL, argv, NULL);
+		if (rc != 0) {
+			continue;
+		}
+		int status = 0;
+		if (waitpid(pid, &status, 0) < 0) {
+			continue;
+		}
+		return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+	}
+	return -1;
 }
 
 static int installDaemon(NSString *daemonSrc, NSString *plistSrc)
