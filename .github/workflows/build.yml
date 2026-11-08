@@ -15,7 +15,7 @@ permissions:
 jobs:
   build:
     name: Build TrollStore TIPA
-    runs-on: macos-14
+    runs-on: macos-latest
 
     steps:
       # 1. 下载源码
