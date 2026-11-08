@@ -6,7 +6,12 @@
 /// write+fsync 一行，不经过 ObjC、不经过任何内存缓冲。
 /// 纯 C 实现，所以在「连 ObjC 调用都可能崩」的情况下仍然能留下现场。
 void RTTraceInit(void);
+/// ObjC 侧用的可变参数版本（自定义格式化）。
 void RTTrace(const char *fmt, ...);
+/// Swift 唯一可调用的写入入口：Swift 不能调用 C 可变参数函数
+/// （`'RTTrace' is unavailable: Variadic function is unavailable`），
+/// 所以格式化全部在 Swift 侧拼好，这里只负责加换行并 write+fsync。
+void RTTraceStr(const char *line);
 /// 当前追踪文件的完整路径（C 字符串），未初始化时返回 ""。界面按这个路径读尾部。
 const char *RTTracePath(void);
 

@@ -1,10 +1,11 @@
 import UIKit
 
 /// v13：把 Swift 字符串安全地送进 C 级追踪器。
-/// RTTrace 是纯 C 的 write+fsync（启动时已预打开 fd），所以就算下一步崩在
+/// RTTraceStr 是纯 C 的 write+fsync（启动时已预打开 fd），所以就算下一步崩在
 /// ObjC 运行时里，这一行也已经落在磁盘上了。
+/// 注意：Swift 不能调用 C 可变参数函数，所以只能走 RTTraceStr 这个非可变参数入口。
 func RTTraceLine(_ text: String) {
-    text.withCString { RTTrace("%s", $0) }
+    text.withCString { RTTraceStr($0) }
 }
 
 @UIApplicationMain

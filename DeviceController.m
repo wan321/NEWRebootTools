@@ -107,6 +107,23 @@ void RTTrace(const char *fmt, ...)
 	TraceRaw(line, n);
 }
 
+// Swift 侧入口：Swift 导入 C 可变参数函数会被标记 unavailable，所以单独给一个
+// 非可变参数版本，格式化在 Swift 里拼好，这里只补换行。
+void RTTraceStr(const char *s)
+{
+	if (s == NULL) return;
+	if (gTraceFd < 0) RTTraceInit();
+	if (gTraceFd < 0) return;
+
+	char line[512];
+	int n = snprintf(line, sizeof(line) - 2, "%s", s);
+	if (n < 0) return;
+	if (n > (int)sizeof(line) - 2) n = (int)sizeof(line) - 2;
+	line[n++] = '\n';
+	line[n] = 0;
+	TraceRaw(line, n);
+}
+
 // ---------------- v12 崩溃定位探针 ----------------
 // 每次 open/append/write/fsync/close，绝不经过任何内存缓冲。
 // v13 起同时镜像一份到 rt-trace.log，两条路都断掉才算没留下证据。
