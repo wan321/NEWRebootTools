@@ -18,10 +18,26 @@ trap 'rm -rf "$tmpdir"' EXIT
 unzip -q "$source_package" -d "$tmpdir"
 app="$tmpdir/Payload/RebootTools.app"
 test -d "$app" || { echo 'Payload/RebootTools.app is missing.' >&2; exit 1; }
-for helper in RebootRootHelper RebootUserSpaceHelper; do
-  test -s "$app/$helper" || { echo "$helper is missing from the built app bundle." >&2; exit 1; }
-  test -x "$app/$helper" || { echo "$helper lost executable permission in the app bundle." >&2; exit 1; }
-  lipo "$app/$helper" -verify_arch arm64
+for helper in \
+  "$APP_PATH/RebootRootHelper" \
+  "$APP_PATH/RebootUserSpaceHelper"
+do
+  if [ ! -s "$helper" ]; then
+    echo "Missing helper: $helper" >&2
+    exit 1
+  fi
+
+  echo "Checking architecture: $helper"
+  lipo "$helper" -verify_arch arm64
+
+  chmod +x "$helper"
+
+  if [ ! -x "$helper" ]; then
+    echo "Helper is not executable: $helper" >&2
+    exit 1
+  fi
+
+  echo "Helper OK: $helper"
 done
 /usr/libexec/PlistBuddy -c 'Print :CFBundleURLTypes:0:CFBundleURLSchemes:0' "$app/Info.plist" | grep -qx 'reboottools'
 cp "$source_package" dist/RebootTools-Shortcuts.tipa
