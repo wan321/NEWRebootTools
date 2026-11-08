@@ -14,6 +14,9 @@ class RootViewController: UIViewController {
     // v8：安装 root 守护进程从「启动自动跑」改成「按钮显式触发」。
     private let installDaemonButton = UIButton(type: .system)
     private var installingDaemon = false
+    // v11：身份探测从「启动自动跑」改成按钮触发（启动阶段不再 spawn 任何子进程）。
+    private let probeButton = UIButton(type: .system)
+    private var probing = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -152,6 +155,15 @@ class RootViewController: UIViewController {
         installDaemonButton.addTarget(self, action: #selector(installDaemonTapped), for: .touchUpInside)
         self.view.addSubview(installDaemonButton)
 
+        // v11：身份探测按钮（启动时不再自动 spawn）
+        probeButton.translatesAutoresizingMaskIntoConstraints = false
+        probeButton.setTitle("运行 root 探测", for: .normal)
+        probeButton.titleLabel?.font = UIFont.systemFont(ofSize: 12)
+        probeButton.backgroundColor = .secondarySystemBackground
+        probeButton.layer.cornerRadius = 6
+        probeButton.addTarget(self, action: #selector(probeTapped), for: .touchUpInside)
+        self.view.addSubview(probeButton)
+
         // AutoLayout
         NSLayoutConstraint.activate([
             iconImageView.widthAnchor.constraint(equalToConstant: 100),  // 设置宽度
@@ -196,7 +208,12 @@ class RootViewController: UIViewController {
             installDaemonButton.leadingAnchor.constraint(equalTo: diagTextView.leadingAnchor),
             installDaemonButton.trailingAnchor.constraint(equalTo: diagTextView.trailingAnchor),
             installDaemonButton.heightAnchor.constraint(equalToConstant: 30),
-            installDaemonButton.bottomAnchor.constraint(equalTo: diagTextView.topAnchor, constant: -6)
+            installDaemonButton.bottomAnchor.constraint(equalTo: diagTextView.topAnchor, constant: -6),
+
+            probeButton.leadingAnchor.constraint(equalTo: diagTextView.leadingAnchor),
+            probeButton.trailingAnchor.constraint(equalTo: diagTextView.trailingAnchor),
+            probeButton.heightAnchor.constraint(equalToConstant: 30),
+            probeButton.bottomAnchor.constraint(equalTo: installDaemonButton.topAnchor, constant: -6)
         ])
 
     }
@@ -241,60 +258,70 @@ class RootViewController: UIViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         DaemonManager.bootLog("viewDidAppear")
-        refreshDiagnostics()
+        // v11：启动阶段**不做任何 spawn / 不做后台探测**。
+        // v6..v10 的「点开就闪退」就发生在启动自动探测的后台任务里
+        // （crash 线程 com.apple.root.user-initiated-qos，回溯在 libobjc 释放对象时）。
+        // 所以启动只渲染纯 Swift 的静态信息，身份探测改成按钮显式触发。
+        renderDiagnostics(probeResult: nil)
     }
 
-    /// 启动即自动跑一次身份探测（不改动设备），把结果常驻在屏幕下方。
-    /// 这样即使 URL Scheme 没送达、弹窗被错过，只要打开 App 也能看到一手数据。
-    /// v8：启动时**不再**自动安装 daemon——安装改成面板上方按钮显式触发，
-    /// 以免「点开就闪退」这种问题没有 App 可用（v7 里安装是在 viewDidAppear 自动跑的）。
-    private func refreshDiagnostics() {
+    /// 纯静态渲染：只读心跳/日志文件，不 spawn 任何子进程。
+    private func renderDiagnostics(probeResult: String?) {
         let build = AppDelegate.buildTag
         let appUid = getuid()
         let appEuid = geteuid()
         let permission = settingsUtils.checkInstallPermission()
-        diagTextView.text = "构建 \(build)\nApp uid=\(appUid) euid=\(appEuid)\n权限检查=\(permission)\ndaemon 探测中…"
+        let status = DaemonManager.status()
+        let hasB64 = Bundle.main.path(forResource: "RebootDaemon", ofType: "b64") != nil
+        let hint = status.alive ? "" : "提示：daemon 离线 → 点「安装 root 守护进程」\n"
+
+        var text = """
+        构建 \(build)
+        App uid=\(appUid) euid=\(appEuid)
+        权限检查(可写 /var/mobile/Library/Preferences)=\(permission)
+        daemon \(status.alive ? "在线" : "离线") \(status.detail)  资源 RebootDaemon.b64=\(hasB64 ? "在" : "缺失")
+        \(hint)
+        """
+        if let p = probeResult {
+            text += "身份探测 \(p)\n"
+        } else {
+            text += "身份探测 未运行（点上面「运行 root 探测」）\n"
+        }
+        text += """
+        --- install.log ---
+        \(DaemonManager.logTail(DaemonManager.installLogPath, lines: 3))
+        --- daemon.log ---
+        \(DaemonManager.logTail(DaemonManager.daemonLogPath, lines: 3))
+        --- URL 日志尾部 ---
+        \(RootViewController.logTail())
+        --- 启动面包屑 ---
+        \(RootViewController.bootTail())
+        """
+        diagTextView.text = text
+    }
+
+    /// 显式触发的身份探测（不改动设备）。崩溃排查用：进入前后都写启动面包屑，
+    /// 若这一下闪退，下次打开 App 的面包屑里会留下 probe-start。
+    @objc private func probeTapped() {
+        guard !probing else { return }
+        probing = true
+        probeButton.isEnabled = false
+        probeButton.setTitle("探测中…", for: .normal)
+        DaemonManager.bootLog("probe-start")
 
         DispatchQueue.global(qos: .userInitiated).async {
             let controller = DeviceController()
-            let probe = controller.probeHelperIdentity()
-            let exitCode = controller.lastExitCode
-
-            // daemon 被 launchd 拉起需要一点时间，最多等 3 秒再判定。
-            var status = DaemonManager.status()
-            var waited = 0.0
-            while !status.alive && waited < 3.0 {
-                Thread.sleep(forTimeInterval: 0.5)
-                waited += 0.5
-                status = DaemonManager.status()
-            }
-
-            let daemonLine = "daemon \(status.alive ? "在线" : "离线") \(status.detail)"
-            let hasB64 = Bundle.main.path(forResource: "RebootDaemon", ofType: "b64") != nil
-            let hint = status.alive ? "" : "提示：daemon 离线 → 点上面「安装 root 守护进程」\n"
-            let dTail = DaemonManager.logTail(DaemonManager.daemonLogPath, lines: 3)
-            let iTail = DaemonManager.logTail(DaemonManager.installLogPath, lines: 3)
-            let uTail = RootViewController.logTail()
-            let bTail = RootViewController.bootTail()
-
-            let text = """
-            构建 \(build)
-            App uid=\(appUid) euid=\(appEuid)
-            权限检查(可写 /var/mobile/Library/Preferences)=\(permission)
-            \(daemonLine)  资源 RebootDaemon.b64=\(hasB64 ? "在" : "缺失")
-            \(hint)身份探测 exit=\(exitCode) \(probe ? "ok" : "FAILED")
-            --- install.log ---
-            \(iTail)
-            --- daemon.log ---
-            \(dTail)
-            --- URL 日志尾部 ---
-            \(uTail)
-            --- 启动面包屑 ---
-            \(bTail)
-            """
+            let ok = controller.probeHelperIdentity()
+            let exit = controller.lastExitCode
+            let log = controller.lastLog ?? ""
+            DaemonManager.bootLog("probe-done")
+            let result = "exit=\(exit) \(ok ? "ok" : "FAILED") \(log)"
 
             DispatchQueue.main.async {
-                self.diagTextView.text = text
+                self.probing = false
+                self.probeButton.isEnabled = true
+                self.probeButton.setTitle("运行 root 探测", for: .normal)
+                self.renderDiagnostics(probeResult: result)
             }
         }
     }
@@ -319,7 +346,7 @@ class RootViewController: UIViewController {
                 self.installDaemonButton.setTitle("安装 root 守护进程", for: .normal)
                 self.diagTextView.text = "\(result)\n\n正在重新探测…"
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                    self.refreshDiagnostics()
+                    self.renderDiagnostics(probeResult: nil)
                 }
             }
         }

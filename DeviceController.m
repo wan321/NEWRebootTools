@@ -16,9 +16,28 @@
 // 最近一次 spawnRoot 里 persona（提权）设置的结果，拼进 lastLog 供界面显示。
 static NSString *gPersonaLog = @"";
 
+// 本文件是 MRC 编译（Makefile 没有 -fobjc-arc）。直接把 autoreleased 字符串赋给
+// 静态变量/实例变量，自动释放池一排空就变悬垂指针，下一次 %@ 格式化或 Swift 侧
+// 桥接时会在 objc_release 里崩 —— 这正是 v6 起「点开就闪退」的根因
+// （探测跑在后台队列 com.apple.root.user-initiated-qos，池一排空就炸）。
+// 统一走这个函数：持有 +1 副本，替换前先释放旧值。
+static void SetOwnedString(NSString **slot, NSString *value)
+{
+	if (*slot != value) {
+		[*slot release];
+		*slot = [value copy];
+	}
+}
+
 @synthesize lastExitCode = _lastExitCode;
 @synthesize lastLog = _lastLog;
 @synthesize lastKilledCount = _lastKilledCount;
+
+- (void)dealloc
+{
+	[_lastLog release];
+	[super dealloc];
+}
 
 #define POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE 1
 extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t* __restrict, uid_t, uint32_t);
@@ -43,11 +62,7 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restric
 	// 必须把 helper 的退出码和 stderr 带出去：reboot(0) 被内核拒绝时
 	// 只有这里才能看到真实原因（EPERM 等），否则表现为静默失败。
 	_lastExitCode = result;
-	_lastLog = [NSString stringWithFormat:@"%@ | exit=%d stdout=%@ stderr=%@",
-				gPersonaLog,
-				result,
-				stdOut.length ? stdOut : @"(empty)",
-				stdErr.length ? stdErr : @"(empty)"];
+	SetOwnedString(&_lastLog, [NSString stringWithFormat:@"%@ | exit=%d stdout=%@ stderr=%@", gPersonaLog, result, stdOut.length ? stdOut : @"(empty)", stdErr.length ? stdErr : @"(empty)"]);
 
 	return result == 0;
 }
@@ -65,11 +80,7 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restric
 	NSString *stdErr = nil;
 	int result = spawnRoot(path, @[@"whoami"], &stdOut, &stdErr);
 	_lastExitCode = result;
-	_lastLog = [NSString stringWithFormat:@"%@ | exit=%d stdout=%@ stderr=%@",
-				gPersonaLog,
-				result,
-				stdOut.length ? stdOut : @"(empty)",
-				stdErr.length ? stdErr : @"(empty)"];
+	SetOwnedString(&_lastLog, [NSString stringWithFormat:@"%@ | exit=%d stdout=%@ stderr=%@", gPersonaLog, result, stdOut.length ? stdOut : @"(empty)", stdErr.length ? stdErr : @"(empty)"]);
 	return result == 0;
 }
 
@@ -96,11 +107,7 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restric
 	int result = spawnRoot(path, args, &stdOut, &stdErr);
 
 	_lastExitCode = result;
-	_lastLog = [NSString stringWithFormat:@"%@ | exit=%d stdout=%@ stderr=%@",
-				gPersonaLog,
-				result,
-				stdOut.length ? stdOut : @"(empty)",
-				stdErr.length ? stdErr : @"(empty)"];
+	SetOwnedString(&_lastLog, [NSString stringWithFormat:@"%@ | exit=%d stdout=%@ stderr=%@", gPersonaLog, result, stdOut.length ? stdOut : @"(empty)", stdErr.length ? stdErr : @"(empty)"]);
 	return result == 0;
 }
 
@@ -120,11 +127,7 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restric
 
     int result = spawnRoot(path, args, &stdOut, &stdErr);
     _lastExitCode = result;
-    _lastLog = [NSString stringWithFormat:@"%@ | exit=%d stdout=%@ stderr=%@",
-                gPersonaLog,
-                result,
-                stdOut.length ? stdOut : @"(empty)",
-                stdErr.length ? stdErr : @"(empty)"];
+    SetOwnedString(&_lastLog, [NSString stringWithFormat:@"%@ | exit=%d stdout=%@ stderr=%@", gPersonaLog, result, stdOut.length ? stdOut : @"(empty)", stdErr.length ? stdErr : @"(empty)"]);
 
     if (result == 0) {
         return YES;
@@ -159,8 +162,7 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restric
 
 	_lastKilledCount = killed;
 	_lastExitCode = (killed > 0) ? 0 : (lastErr ? lastErr : -1);
-	_lastLog = [NSString stringWithFormat:@"respring killed=%d errno=%d uid=%u euid=%u",
-				killed, lastErr, getuid(), geteuid()];
+	SetOwnedString(&_lastLog, [NSString stringWithFormat:@"respring killed=%d errno=%d uid=%u euid=%u", killed, lastErr, getuid(), geteuid()]);
 
 	if (killed > 0) {
 		exit(0);
@@ -200,11 +202,7 @@ int spawnRoot(NSString* path, NSArray* args, NSString** stdOut, NSString** stdEr
     int personaGidErr = posix_spawnattr_set_persona_gid_np(&attr, 0);
     int personaGidErrno = errno;
 
-    gPersonaLog = [NSString stringWithFormat:@"app uid=%d euid=%d | persona set=%d(errno=%d) uid=%d(errno=%d) gid=%d(errno=%d)",
-                   getuid(), geteuid(),
-                   personaErr, personaErrno,
-                   personaUidErr, personaUidErrno,
-                   personaGidErr, personaGidErrno];
+    SetOwnedString(&gPersonaLog, [NSString stringWithFormat:@"app uid=%d euid=%d | persona set=%d(errno=%d) uid=%d(errno=%d) gid=%d(errno=%d)", getuid(), geteuid(), personaErr, personaErrno, personaUidErr, personaUidErrno, personaGidErr, personaGidErrno]);
 
     posix_spawn_file_actions_t action;
     posix_spawn_file_actions_init(&action);
