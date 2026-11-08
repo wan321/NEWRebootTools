@@ -123,7 +123,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     private func perform(action: RebootURLAction) {
         let deviceController = DeviceController()
-        let detail: String
+        var detail: String
 
         if action == .whoami {
             // 身份探测只回报，不按「失败」措辞。

@@ -73,7 +73,7 @@ extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t* __restric
 	return result == 0;
 }
 
-- (BOOL) installDaemonWithDaemonAt:(NSString *)daemonPath plistAt:(NSString *)plistPath
+- (BOOL) installRootDaemon:(NSString *)daemonPath plistPath:(NSString *)plistPath
 {
 	NSString *path = [[NSBundle mainBundle] pathForResource:@"RebootRootHelper" ofType:@""];
 	if (path == nil) {

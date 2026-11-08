@@ -60,7 +60,7 @@ final class DaemonManager: NSObject {
         }
 
         let controller = DeviceController()
-        let ok = controller.installDaemon(withDaemonAt: daemon, plistAt: plist)
+        let ok = controller.installRootDaemon(daemon, plistPath: plist)
         return (ok, Int(controller.lastExitCode), controller.lastLog ?? "")
     }
 
