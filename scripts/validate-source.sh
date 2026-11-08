@@ -11,9 +11,9 @@ plutil -lint Resources/Info.plist
 for helper in Resources/RebootRootHelper Resources/RebootUserSpaceHelper; do
   test -s "$helper" || { echo "Missing helper: $helper" >&2; exit 1; }
 
-  # Correct lipo argument order
   lipo "$helper" -verify_arch arm64
 
+  chmod +x "$helper"
   test -x "$helper" || { echo "Helper is not executable: $helper" >&2; exit 1; }
 done
 
