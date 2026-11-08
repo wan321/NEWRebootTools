@@ -7,7 +7,6 @@ on:
     branches:
       - main
       - master
-  pull_request:
 
 permissions:
   contents: read
@@ -18,88 +17,102 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      # 1. 下载源码
+      # 1. 获取源码
       - name: Checkout source
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # 2. 安装构建工具
+      # 2. 安装依赖
       - name: Install dependencies
         shell: bash
         run: |
           set -euo pipefail
+          brew install ldid xz
 
-          brew update
-          brew install ldid make
-
-      # 3. 配置 Theos
+      # 3. 安装 Theos
       - name: Install Theos
         shell: bash
         run: |
           set -euo pipefail
 
-          export THEOS="$GITHUB_WORKSPACE/theos"
+          git clone --recursive \
+            https://github.com/theos/theos.git \
+            "$GITHUB_WORKSPACE/theos"
 
-          if [ ! -d "$THEOS" ]; then
-            git clone --recursive https://github.com/theos/theos.git "$THEOS"
-          fi
+          echo "THEOS=$GITHUB_WORKSPACE/theos" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/theos/bin" >> "$GITHUB_PATH"
 
-          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
-          echo "$THEOS/bin" >> "$GITHUB_PATH"
-
-          echo "Theos installed:"
-          ls -la "$THEOS"
-
-      # 4. 检查项目文件
-      - name: Inspect project
+      # 4. 检查项目结构
+      - name: Check project
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "========== Project structure =========="
-          find . -maxdepth 3 -type f | sort | head -300
+          test -f Makefile
+          test -f RebootRootHelper/Makefile
+          test -d Resources
 
-          echo "========== Makefile =========="
-          if [ -f Makefile ]; then
-            cat Makefile
-          else
-            echo "ERROR: Makefile not found in repository root."
+          echo "Project structure:"
+          find . -maxdepth 2 -type f | sort
+
+      # 5. 编译重启核心 Helper
+      - name: Build RebootRootHelper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          make -C RebootRootHelper clean || true
+          make -C RebootRootHelper FINALPACKAGE=1
+
+          HELPER=""
+
+          while IFS= read -r file; do
+            HELPER="$file"
+            break
+          done < <(
+            find RebootRootHelper/.theos/obj \
+              -type f \
+              -name RebootRootHelper \
+              -print
+          )
+
+          if [ -z "$HELPER" ]; then
+            echo "ERROR: RebootRootHelper executable not found."
+            find RebootRootHelper -type f -print
             exit 1
           fi
 
-      # 5. 编译项目
-      - name: Build project
+          echo "Helper found: $HELPER"
+
+          mkdir -p Resources
+          cp "$HELPER" Resources/RebootRootHelper
+
+          chmod +x Resources/RebootRootHelper
+
+          file Resources/RebootRootHelper
+
+      # 6. 编译主程序并生成 IPA
+      - name: Build main application
         shell: bash
         run: |
           set -euo pipefail
-
-          export THEOS="$GITHUB_WORKSPACE/theos"
-
-          echo "========== Build =========="
 
           make clean || true
 
           make package \
             FINALPACKAGE=1 \
-            THEOS_PACKAGE_SCHEME=rootless=0 \
-            ARCHS=arm64
+            PACKAGE_FORMAT=ipa
 
-      # 6. 检查编译产物并生成 TIPA
-      - name: Package TIPA
+          echo "Build completed."
+
+      # 7. 收集 TIPA
+      - name: Collect TIPA
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p dist
-
-          echo "========== Search build outputs =========="
-
-          find . -type f \
-            \( -name "*.deb" -o -name "*.ipa" -o -name "*.tipa" \) \
-            ! -path "./dist/*" \
-            ! -path "./.git/*" \
-            -print
 
           PACKAGE=""
 
@@ -107,115 +120,85 @@ jobs:
             PACKAGE="$file"
             break
           done < <(
-            find . -type f \
+            find packages -maxdepth 1 -type f \
               \( -name "*.tipa" -o -name "*.ipa" \) \
-              ! -path "./dist/*" \
-              ! -path "./.git/*" \
-              -print
+              -print 2>/dev/null
           )
 
-          if [ -n "$PACKAGE" ]; then
-            cp "$PACKAGE" dist/RebootTools-Shortcuts.tipa
-
-          else
-            DEB=""
-
-            while IFS= read -r file; do
-              DEB="$file"
-              break
-            done < <(
-              find . -type f -name "*.deb" \
-                ! -path "./dist/*" \
-                ! -path "./.git/*" \
-                -print
-            )
-
-            if [ -z "$DEB" ]; then
-              echo "ERROR: No IPA, TIPA or DEB generated."
-              exit 1
-            fi
-
-            echo "Found DEB: $DEB"
-            echo "A DEB is not a TrollStore TIPA."
-            echo "The project needs an app bundle packaging step."
+          if [ -z "$PACKAGE" ]; then
+            echo "ERROR: No IPA or TIPA generated."
+            echo "Available files:"
+            find . -maxdepth 5 -type f \
+              \( -name "*.ipa" -o -name "*.tipa" \) \
+              -print
             exit 1
           fi
 
-          echo "========== Final package =========="
+          cp "$PACKAGE" dist/RebootTools-Shortcuts.tipa
+
+          echo "Final package:"
           ls -lh dist/RebootTools-Shortcuts.tipa
 
-      # 7. 验证 TIPA 内部结构
+      # 8. 检查安装包
       - name: Verify TIPA
         shell: bash
         run: |
           set -euo pipefail
 
           PACKAGE="dist/RebootTools-Shortcuts.tipa"
-
-          echo "========== Archive verification =========="
+          TMP="$(mktemp -d)"
 
           unzip -t "$PACKAGE"
-
-          echo "========== Contents =========="
-
-          unzip -l "$PACKAGE"
-
-          TMP="$(mktemp -d)"
           unzip -q "$PACKAGE" -d "$TMP"
 
           APP="$(find "$TMP/Payload" \
             -maxdepth 2 \
             -type d \
             -name "*.app" \
-            -print -quit 2>/dev/null || true)"
+            -print -quit)"
 
           if [ -z "$APP" ]; then
-            echo "ERROR: Payload/*.app not found."
-            rm -rf "$TMP"
+            echo "ERROR: Payload/*.app missing."
             exit 1
           fi
 
-          echo "App bundle: $APP"
-
-          if [ ! -f "$APP/Info.plist" ]; then
-            echo "ERROR: Info.plist missing."
-            rm -rf "$TMP"
-            exit 1
-          fi
+          test -f "$APP/Info.plist"
 
           plutil -lint "$APP/Info.plist"
-
-          echo "========== Executable =========="
 
           EXECUTABLE=$(/usr/libexec/PlistBuddy \
             -c "Print :CFBundleExecutable" \
             "$APP/Info.plist")
 
-          if [ ! -f "$APP/$EXECUTABLE" ]; then
-            echo "ERROR: Main executable missing: $EXECUTABLE"
-            rm -rf "$TMP"
-            exit 1
-          fi
+          test -f "$APP/$EXECUTABLE"
 
-          file "$APP/$EXECUTABLE"
-
-          echo "========== Minimum iOS version =========="
-
-          /usr/libexec/PlistBuddy \
-            -c "Print :MinimumOSVersion" \
-            "$APP/Info.plist" || true
-
-          echo "========== Bundle ID =========="
+          echo "========== APP INFORMATION =========="
 
           /usr/libexec/PlistBuddy \
             -c "Print :CFBundleIdentifier" \
             "$APP/Info.plist"
 
+          /usr/libexec/PlistBuddy \
+            -c "Print :MinimumOSVersion" \
+            "$APP/Info.plist" || true
+
+          echo "========== EXECUTABLE =========="
+
+          file "$APP/$EXECUTABLE"
+
+          echo "========== HELPER =========="
+
+          if [ -f "$APP/RebootRootHelper" ]; then
+            file "$APP/RebootRootHelper"
+          else
+            echo "WARNING: RebootRootHelper not found inside app."
+          fi
+
           rm -rf "$TMP"
 
-          echo "TIPA structure verification passed."
+          echo "TIPA verification completed."
 
-      # 8. 上传最终 TIPA
+      # 9. 上传 GitHub 构建产物
       - name: Upload TIPA
         uses: actions/upload-artifact@v4
         with:
